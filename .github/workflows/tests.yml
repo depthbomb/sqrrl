@@ -1,0 +1,97 @@
+name: Tests
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Create virtual environment
+        run: python -m venv .venv
+      - name: Select virtual environment
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            echo "$GITHUB_WORKSPACE/.venv/Scripts" >> "$GITHUB_PATH"
+          else
+            echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          fi
+      - run: python -m pip install -e ".[dev]"
+      - name: Check release version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python - <<'PY'
+          from os import environ
+          from pathlib import Path
+          from tomllib import loads
+
+          version = loads(Path('pyproject.toml').read_text())['project']['version']
+          tag = environ.get('RELEASE_TAG', '')
+          if tag and tag != f'v{version}':
+              raise SystemExit(f'Release tag {tag!r} does not match version {version!r}')
+          print(f'Checking sqrrl {version}')
+          PY
+      - run: python -m ruff check .
+      - run: python -m ruff format --check .
+      - run: python -m mypy
+      - run: python -m pyright
+      - name: Check the example schema and generated models
+        run: |
+          python -m sqrrl generate --config examples/sqrrl.json --check
+          python -m sqrrl migrate check --config examples/sqrrl.json
+      - run: python -m build
+      - run: python -m twine check --strict dist/*
+      - name: Install the built wheel
+        run: python -m pip install --force-reinstall --no-deps dist/*.whl
+      - name: Confirm imports come from the installed wheel
+        run: |
+          python -I - <<'PY'
+          import sqrrl
+          from sys import prefix
+          from pathlib import Path
+
+          if not Path(sqrrl.__file__).resolve().is_relative_to(Path(prefix).resolve()):
+              raise SystemExit(f'Imported checkout instead of installed wheel: {sqrrl.__file__}')
+          print(sqrrl.__file__)
+          PY
+      - name: Test the installed wheel with coverage
+        run: |
+          test_dir=$(mktemp -d)
+          cp -R tests examples "$test_dir/"
+          cp pyproject.toml "$test_dir/"
+          cd "$test_dir"
+          python -m pytest --cov=sqrrl --cov-branch
+          python -m examples.main
+      - run: python -m pip check
+      - name: Save validated distributions
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14

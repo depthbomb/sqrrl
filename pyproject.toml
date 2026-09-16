@@ -1,0 +1,77 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sqrrl"
+version = "0.1.0"
+description = "Generated typed async data access and checked migrations for SQLite"
+readme = "README.md"
+requires-python = ">=3.14"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = ["aiosqlite>=0.22"]
+authors = [{ name = "depthbomb" }]
+keywords = ["sqlite", "async", "database", "migrations", "code-generation", "typing"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Documentation = "https://github.com/depthbomb/sqrrl#readme"
+Source = "https://github.com/depthbomb/sqrrl"
+Issues = "https://github.com/depthbomb/sqrrl/issues"
+Releases = "https://github.com/depthbomb/sqrrl/releases"
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.2",
+    "mypy>=1.18.2",
+    "pyright>=1.1.407",
+    "pytest>=8",
+    "pytest-asyncio>=1",
+    "pytest-cov>=6",
+    "ruff>=0.14",
+    "twine>=6",
+]
+
+[project.scripts]
+sqrrl = "sqrrl.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sqrrl", "sqrrl.*"]
+
+[tool.setuptools.package-data]
+sqrrl = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-config --strict-markers"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+files = ["sqrrl", "examples"]
+
+[tool.pyright]
+include = ["sqrrl", "examples"]
+pythonVersion = "3.14"
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"
+
+[tool.ruff]
+target-version = "py314"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

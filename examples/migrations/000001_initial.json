@@ -1,0 +1,195 @@
+{
+  "after": "befbf33d49e857f4b5bc515ad4630fe3b0c1f8bbd07660a2f67ac6edc2b1de26",
+  "before": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "checksum": "587d8ffd8fa9b42f21785a36643691cdac35d4dbc455623f240b9f2e4ba78d38",
+  "format": 1,
+  "name": "initial",
+  "parent": "",
+  "schema": {
+    "tables": [
+      {
+        "checks": [],
+        "fields": [
+          {
+            "default_sql": null,
+            "is_immutable": false,
+            "is_nullable": false,
+            "is_primary": false,
+            "is_unique": false,
+            "key": "user_id",
+            "kind": "integer",
+            "name": "user_id",
+            "reference": {
+              "fields": [
+                "user_id"
+              ],
+              "on_delete": "CASCADE",
+              "table": "users",
+              "target": [
+                "id"
+              ]
+            }
+          },
+          {
+            "default_sql": null,
+            "is_immutable": false,
+            "is_nullable": false,
+            "is_primary": false,
+            "is_unique": false,
+            "key": "key",
+            "kind": "text",
+            "name": "key",
+            "reference": null
+          },
+          {
+            "default_sql": null,
+            "is_immutable": false,
+            "is_nullable": true,
+            "is_primary": false,
+            "is_unique": false,
+            "key": "value",
+            "kind": "text",
+            "name": "value",
+            "reference": null
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "key": "settings",
+        "model": "Setting",
+        "name": "settings",
+        "non_strict": false,
+        "primary_key": [
+          "user_id",
+          "key"
+        ]
+      },
+      {
+        "checks": [],
+        "fields": [
+          {
+            "default_sql": null,
+            "is_immutable": false,
+            "is_nullable": false,
+            "is_primary": true,
+            "is_unique": false,
+            "key": "id",
+            "kind": "integer",
+            "name": "id",
+            "reference": null
+          },
+          {
+            "default_sql": null,
+            "is_immutable": false,
+            "is_nullable": false,
+            "is_primary": false,
+            "is_unique": false,
+            "key": "owner_id",
+            "kind": "integer",
+            "name": "owner_id",
+            "reference": {
+              "fields": [
+                "owner_id"
+              ],
+              "on_delete": "CASCADE",
+              "table": "users",
+              "target": [
+                "id"
+              ]
+            }
+          },
+          {
+            "default_sql": null,
+            "is_immutable": false,
+            "is_nullable": false,
+            "is_primary": false,
+            "is_unique": false,
+            "key": "title",
+            "kind": "text",
+            "name": "title",
+            "reference": null
+          },
+          {
+            "default_sql": "0",
+            "is_immutable": false,
+            "is_nullable": false,
+            "is_primary": false,
+            "is_unique": false,
+            "key": "done",
+            "kind": "boolean",
+            "name": "done",
+            "reference": null
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [
+          {
+            "fields": [
+              "owner_id"
+            ],
+            "name": "tasks_owner_idx",
+            "unique": false,
+            "where": null
+          }
+        ],
+        "key": "tasks",
+        "model": "Task",
+        "name": "tasks",
+        "non_strict": false,
+        "primary_key": []
+      },
+      {
+        "checks": [],
+        "fields": [
+          {
+            "default_sql": null,
+            "is_immutable": false,
+            "is_nullable": false,
+            "is_primary": true,
+            "is_unique": false,
+            "key": "id",
+            "kind": "integer",
+            "name": "id",
+            "reference": null
+          },
+          {
+            "default_sql": null,
+            "is_immutable": false,
+            "is_nullable": false,
+            "is_primary": false,
+            "is_unique": false,
+            "key": "name",
+            "kind": "text",
+            "name": "name",
+            "reference": null
+          },
+          {
+            "default_sql": null,
+            "is_immutable": false,
+            "is_nullable": true,
+            "is_primary": false,
+            "is_unique": true,
+            "key": "email",
+            "kind": "text",
+            "name": "email",
+            "reference": null
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "key": "users",
+        "model": "User",
+        "name": "users",
+        "non_strict": false,
+        "primary_key": []
+      }
+    ]
+  },
+  "statements": [
+    "CREATE TABLE \"settings\" (\n  \"user_id\" INTEGER NOT NULL,\n  \"key\" TEXT NOT NULL,\n  \"value\" TEXT,\n  PRIMARY KEY (\"user_id\", \"key\"),\n  FOREIGN KEY (\"user_id\") REFERENCES \"users\" (\"id\") ON DELETE CASCADE\n) STRICT;",
+    "CREATE TABLE \"tasks\" (\n  \"id\" INTEGER PRIMARY KEY NOT NULL,\n  \"owner_id\" INTEGER NOT NULL,\n  \"title\" TEXT NOT NULL,\n  \"done\" INTEGER NOT NULL DEFAULT 0 CHECK (\"done\" IN (0, 1)),\n  FOREIGN KEY (\"owner_id\") REFERENCES \"users\" (\"id\") ON DELETE CASCADE\n) STRICT;",
+    "CREATE INDEX \"tasks_owner_idx\" ON \"tasks\" (\"owner_id\");",
+    "CREATE TABLE \"users\" (\n  \"id\" INTEGER PRIMARY KEY NOT NULL,\n  \"name\" TEXT NOT NULL,\n  \"email\" TEXT UNIQUE\n) STRICT;"
+  ],
+  "version": 1
+}

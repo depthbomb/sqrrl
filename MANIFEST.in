@@ -1,0 +1,5 @@
+include .gitignore
+recursive-include tests *.py
+recursive-include benchmarks *.py
+recursive-include examples *.py *.json *.sql
+global-exclude __pycache__ *.py[cod] *.pyd *.so
