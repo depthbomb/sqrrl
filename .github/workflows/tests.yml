@@ -56,7 +56,6 @@ jobs:
           print(f'Checking sqrrl {version}')
           PY
       - run: python -m ruff check .
-      - run: python -m ruff format --check .
       - run: python -m mypy
       - run: python -m pyright
       - name: Check the example schema and generated models

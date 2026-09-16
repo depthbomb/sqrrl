@@ -1,6 +1,7 @@
 from pytest import mark
 from subprocess import run
 from sys import executable
+from textwrap import dedent
 from json import loads, dumps
 
 def invoke(directory, *arguments, success=True):
@@ -19,7 +20,8 @@ def test_fresh_consumer_workflow_without_schema_import_on_apply(tmp_path):
     invoke(tmp_path, "migrate", "up", "--db", "app.db")
     assert "applied" in invoke(tmp_path, "migrate", "status", "--db", "app.db").stdout
     (tmp_path / "consumer.py").write_text(
-            """from asyncio import run
+            dedent('''\
+    from asyncio import run
     from sqrrl import Database
     from models import Client, NoteColumns
     
@@ -31,7 +33,7 @@ def test_fresh_consumer_workflow_without_schema_import_on_apply(tmp_path):
             assert (await client.notes.query().where(NoteColumns.done.eq(True)).only()).title == "hello"
     
     run(main())
-    """,
+    '''),
             encoding="utf-8",
     )
     (tmp_path / "schema.py").write_text('raise RuntimeError("schema must not be imported")\n', encoding="utf-8")

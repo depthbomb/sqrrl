@@ -9,11 +9,13 @@ from typing import AsyncIterator, Optional, Optional as _Optional
 from sqrrl.runtime import UNSET, Column as _Column, Database, Repository, Unset
 from sqrrl.runtime import decode_boolean, decode_integer, decode_text, decode_nullable
 
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Setting:
     user_id: _int
     key: _str
     value: _Optional[_str]
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SettingKey:
@@ -33,44 +35,47 @@ class User:
     name: _str
     email: _Optional[_str]
 
+
 _SCHEMA = Schema.from_dict({'tables': ({'fields': ({'kind': 'integer',
-                                                    'name': 'user_id',
-                                                    'reference': {'fields': ('user_id',),
-                                                                  'on_delete': 'CASCADE',
-                                                                  'table': 'users',
-                                                                  'target': ('id',)}},
-                                                   {'kind': 'text', 'name': 'key'},
-                                                   {'is_nullable': True, 'kind': 'text', 'name': 'value'}),
-                                        'model': 'Setting',
-                                        'name': 'settings',
-                                        'primary_key': ('user_id', 'key')},
-                                       {'fields': ({'is_primary': True, 'kind': 'integer', 'name': 'id'},
-                                                   {'kind': 'integer',
-                                                    'name': 'owner_id',
-                                                    'reference': {'fields': ('owner_id',),
-                                                                  'on_delete': 'CASCADE',
-                                                                  'table': 'users',
-                                                                  'target': ('id',)}},
-                                                   {'kind': 'text', 'name': 'title'},
-                                                   {'default_sql': '0', 'kind': 'boolean', 'name': 'done'}),
-                                        'indexes': ({'fields': ('owner_id',), 'name': 'tasks_owner_idx'},),
-                                        'model': 'Task',
-                                        'name': 'tasks'},
-                                       {'fields': ({'is_primary': True, 'kind': 'integer', 'name': 'id'},
-                                                   {'kind': 'text', 'name': 'name'},
-                                                   {'is_nullable': True, 'is_unique': True, 'kind': 'text',
-                                                    'name': 'email'}),
-                                        'model': 'User',
-                                        'name': 'users'})})
+                         'name': 'user_id',
+                         'reference': {'fields': ('user_id',),
+                                       'on_delete': 'CASCADE',
+                                       'table': 'users',
+                                       'target': ('id',)}},
+                        {'kind': 'text', 'name': 'key'},
+                        {'is_nullable': True, 'kind': 'text', 'name': 'value'}),
+             'model': 'Setting',
+             'name': 'settings',
+             'primary_key': ('user_id', 'key')},
+            {'fields': ({'is_primary': True, 'kind': 'integer', 'name': 'id'},
+                        {'kind': 'integer',
+                         'name': 'owner_id',
+                         'reference': {'fields': ('owner_id',),
+                                       'on_delete': 'CASCADE',
+                                       'table': 'users',
+                                       'target': ('id',)}},
+                        {'kind': 'text', 'name': 'title'},
+                        {'default_sql': '0', 'kind': 'boolean', 'name': 'done'}),
+             'indexes': ({'fields': ('owner_id',), 'name': 'tasks_owner_idx'},),
+             'model': 'Task',
+             'name': 'tasks'},
+            {'fields': ({'is_primary': True, 'kind': 'integer', 'name': 'id'},
+                        {'kind': 'text', 'name': 'name'},
+                        {'is_nullable': True, 'is_unique': True, 'kind': 'text', 'name': 'email'}),
+             'model': 'User',
+             'name': 'users'})})
+
 
 def _decode_settings(row: Row) -> Setting:
     return Setting(
-            user_id=decode_integer(row['user_id']),
-            key=decode_text(row['key']),
-            value=decode_nullable(row['value'], decode_text),
+        user_id=decode_integer(row['user_id']),
+        key=decode_text(row['key']),
+        value=decode_nullable(row['value'], decode_text),
     )
 
+
 _model_Setting = Setting
+
 
 @dataclass(frozen=True)
 class _SettingColumns:
@@ -78,7 +83,9 @@ class _SettingColumns:
     key: _Column[_model_Setting, _str] = _Column(_model_Setting, _SCHEMA.tables[0].field('key'))
     value: _Column[_model_Setting, _Optional[_str]] = _Column(_model_Setting, _SCHEMA.tables[0].field('value'))
 
+
 SettingColumns = _SettingColumns()
+
 
 class SettingRepository(Repository[Setting]):
     def __init__(_self, database: Database) -> None:
@@ -96,15 +103,18 @@ class SettingRepository(Repository[Setting]):
     async def delete(_self, _key: SettingKey, /) -> None:
         await _self._delete((_key.user_id, _key.key,))
 
+
 def _decode_tasks(row: Row) -> Task:
     return Task(
-            id=decode_integer(row['id']),
-            owner_id=decode_integer(row['owner_id']),
-            title=decode_text(row['title']),
-            done=decode_boolean(row['done']),
+        id=decode_integer(row['id']),
+        owner_id=decode_integer(row['owner_id']),
+        title=decode_text(row['title']),
+        done=decode_boolean(row['done']),
     )
 
+
 _model_Task = Task
+
 
 @dataclass(frozen=True)
 class _TaskColumns:
@@ -113,7 +123,9 @@ class _TaskColumns:
     title: _Column[_model_Task, _str] = _Column(_model_Task, _SCHEMA.tables[1].field('title'))
     done: _Column[_model_Task, _bool] = _Column(_model_Task, _SCHEMA.tables[1].field('done'))
 
+
 TaskColumns = _TaskColumns()
+
 
 class TaskRepository(Repository[Task]):
     def __init__(_self, database: Database) -> None:
@@ -131,14 +143,17 @@ class TaskRepository(Repository[Task]):
     async def delete(_self, _key: int, /) -> None:
         await _self._delete((_key,))
 
+
 def _decode_users(row: Row) -> User:
     return User(
-            id=decode_integer(row['id']),
-            name=decode_text(row['name']),
-            email=decode_nullable(row['email'], decode_text),
+        id=decode_integer(row['id']),
+        name=decode_text(row['name']),
+        email=decode_nullable(row['email'], decode_text),
     )
 
+
 _model_User = User
+
 
 @dataclass(frozen=True)
 class _UserColumns:
@@ -146,7 +161,9 @@ class _UserColumns:
     name: _Column[_model_User, _str] = _Column(_model_User, _SCHEMA.tables[2].field('name'))
     email: _Column[_model_User, _Optional[_str]] = _Column(_model_User, _SCHEMA.tables[2].field('email'))
 
+
 UserColumns = _UserColumns()
+
 
 class UserRepository(Repository[User]):
     def __init__(_self, database: Database) -> None:
@@ -163,6 +180,7 @@ class UserRepository(Repository[User]):
 
     async def delete(_self, _key: int, /) -> None:
         await _self._delete((_key,))
+
 
 class Client:
     def __init__(self, database: Database) -> None:

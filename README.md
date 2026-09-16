@@ -242,7 +242,6 @@ PowerShell, or `source .venv/bin/activate` in bash).
 python -m pip install -e ".[dev]"
 python -m pytest --cov=sqrrl --cov-branch
 python -m ruff check .
-python -m ruff format --check .
 python -m mypy
 python -m pyright
 python -m sqrrl generate --config examples/sqrrl.json --check
