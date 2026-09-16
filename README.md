@@ -1,7 +1,6 @@
 # sqrrl (pronounced squirrel)
 
-Typed async SQLite access, generated from a Python schema, with migrations you can
-read before you run them.
+Typed async SQLite access, generated from a Python schema, with easy migration management.
 
 Describe your tables once, and sqrrl generates dataclasses, repositories, and
 column helpers with real type annotations. Your editor knows which fields a
