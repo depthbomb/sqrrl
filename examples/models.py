@@ -4,10 +4,11 @@ from sqlite3 import Row
 from sqrrl.schema import Schema
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
+from sqrrl.runtime import Increment as _Increment
 from builtins import bool as _bool, int as _int, str as _str
-from typing import AsyncIterator, Optional, Optional as _Optional
-from sqrrl.runtime import UNSET, Column as _Column, Database, Repository, Unset
 from sqrrl.runtime import decode_boolean, decode_integer, decode_text, decode_nullable
+from typing import AsyncGenerator as _AsyncGenerator, Iterable as _Iterable, Optional, Optional as _Optional
+from sqrrl.runtime import UNSET, UNSET as _UNSET, Column as _Column, Conflict as _Conflict, Database, Predicate, Repository, Unset, Unset as _Unset
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -15,6 +16,13 @@ class Setting:
     user_id: _int
     key: _str
     value: _Optional[_str]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SettingCreate:
+    user_id: _int
+    key: _str
+    value: _Optional[_str] | _Unset = _UNSET
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -29,11 +37,26 @@ class Task:
     title: _str
     done: _bool
 
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TaskCreate:
+    id: _int | _Unset = _UNSET
+    owner_id: _int
+    title: _str
+    done: _bool | _Unset = _UNSET
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class User:
     id: _int
     name: _str
     email: _Optional[_str]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class UserCreate:
+    id: _int | _Unset = _UNSET
+    name: _str
+    email: _Optional[_str] | _Unset = _UNSET
 
 
 _SCHEMA = Schema.from_dict({'tables': ({'fields': ({'kind': 'integer',
@@ -89,7 +112,7 @@ SettingColumns = _SettingColumns()
 
 class SettingRepository(Repository[Setting]):
     def __init__(_self, database: Database) -> None:
-        Repository.__init__(_self, database, _SCHEMA.tables[0], Setting, _decode_settings)
+        super().__init__(database, _SCHEMA.tables[0], Setting, _decode_settings)
 
     async def get(_self, _key: SettingKey, /) -> Setting:
         return await _self._get((_key.user_id, _key.key,))
@@ -97,8 +120,18 @@ class SettingRepository(Repository[Setting]):
     async def create(_self, *, user_id: int, key: str, value: Optional[str] | Unset = UNSET) -> Setting:
         return await _self._insert({'user_id': user_id, 'key': key, 'value': value})
 
+    async def insert(_self, _row: SettingCreate, /, *, conflict: Optional[_Conflict[Setting]] = None) -> Optional[Setting]:
+        rows = await _self._insert_many(({'user_id': _row.user_id, 'key': _row.key, 'value': _row.value},), conflict)
+        return rows[0] if rows else None
+
+    async def create_many(_self, _rows: _Iterable[SettingCreate], /, *, conflict: Optional[_Conflict[Setting]] = None) -> list[Setting]:
+        return await _self._insert_many(({'user_id': _row.user_id, 'key': _row.key, 'value': _row.value} for _row in _rows), conflict)
+
     async def update(_self, _key: SettingKey, /, *, value: Optional[str] | Unset = UNSET) -> Setting:
         return await _self._update((_key.user_id, _key.key,), {'value': value})
+
+    async def update_where(_self, _predicate: Optional[Predicate[Setting]] = None, /, *, _all_rows: bool = False, value: Optional[str] | Unset = UNSET) -> int:
+        return await _self._update_where(_predicate, {'value': value}, all_rows=_all_rows)
 
     async def delete(_self, _key: SettingKey, /) -> None:
         await _self._delete((_key.user_id, _key.key,))
@@ -129,7 +162,7 @@ TaskColumns = _TaskColumns()
 
 class TaskRepository(Repository[Task]):
     def __init__(_self, database: Database) -> None:
-        Repository.__init__(_self, database, _SCHEMA.tables[1], Task, _decode_tasks)
+        super().__init__(database, _SCHEMA.tables[1], Task, _decode_tasks)
 
     async def get(_self, _key: int, /) -> Task:
         return await _self._get((_key,))
@@ -137,8 +170,18 @@ class TaskRepository(Repository[Task]):
     async def create(_self, *, id: int | Unset = UNSET, owner_id: int, title: str, done: bool | Unset = UNSET) -> Task:
         return await _self._insert({'id': id, 'owner_id': owner_id, 'title': title, 'done': done})
 
-    async def update(_self, _key: int, /, *, owner_id: int | Unset = UNSET, title: str | Unset = UNSET, done: bool | Unset = UNSET) -> Task:
+    async def insert(_self, _row: TaskCreate, /, *, conflict: Optional[_Conflict[Task]] = None) -> Optional[Task]:
+        rows = await _self._insert_many(({'id': _row.id, 'owner_id': _row.owner_id, 'title': _row.title, 'done': _row.done},), conflict)
+        return rows[0] if rows else None
+
+    async def create_many(_self, _rows: _Iterable[TaskCreate], /, *, conflict: Optional[_Conflict[Task]] = None) -> list[Task]:
+        return await _self._insert_many(({'id': _row.id, 'owner_id': _row.owner_id, 'title': _row.title, 'done': _row.done} for _row in _rows), conflict)
+
+    async def update(_self, _key: int, /, *, owner_id: int | _Increment[int] | Unset = UNSET, title: str | Unset = UNSET, done: bool | Unset = UNSET) -> Task:
         return await _self._update((_key,), {'owner_id': owner_id, 'title': title, 'done': done})
+
+    async def update_where(_self, _predicate: Optional[Predicate[Task]] = None, /, *, _all_rows: bool = False, owner_id: int | _Increment[int] | Unset = UNSET, title: str | Unset = UNSET, done: bool | Unset = UNSET) -> int:
+        return await _self._update_where(_predicate, {'owner_id': owner_id, 'title': title, 'done': done}, all_rows=_all_rows)
 
     async def delete(_self, _key: int, /) -> None:
         await _self._delete((_key,))
@@ -167,7 +210,7 @@ UserColumns = _UserColumns()
 
 class UserRepository(Repository[User]):
     def __init__(_self, database: Database) -> None:
-        Repository.__init__(_self, database, _SCHEMA.tables[2], User, _decode_users)
+        super().__init__(database, _SCHEMA.tables[2], User, _decode_users)
 
     async def get(_self, _key: int, /) -> User:
         return await _self._get((_key,))
@@ -175,8 +218,18 @@ class UserRepository(Repository[User]):
     async def create(_self, *, id: int | Unset = UNSET, name: str, email: Optional[str] | Unset = UNSET) -> User:
         return await _self._insert({'id': id, 'name': name, 'email': email})
 
+    async def insert(_self, _row: UserCreate, /, *, conflict: Optional[_Conflict[User]] = None) -> Optional[User]:
+        rows = await _self._insert_many(({'id': _row.id, 'name': _row.name, 'email': _row.email},), conflict)
+        return rows[0] if rows else None
+
+    async def create_many(_self, _rows: _Iterable[UserCreate], /, *, conflict: Optional[_Conflict[User]] = None) -> list[User]:
+        return await _self._insert_many(({'id': _row.id, 'name': _row.name, 'email': _row.email} for _row in _rows), conflict)
+
     async def update(_self, _key: int, /, *, name: str | Unset = UNSET, email: Optional[str] | Unset = UNSET) -> User:
         return await _self._update((_key,), {'name': name, 'email': email})
+
+    async def update_where(_self, _predicate: Optional[Predicate[User]] = None, /, *, _all_rows: bool = False, name: str | Unset = UNSET, email: Optional[str] | Unset = UNSET) -> int:
+        return await _self._update_where(_predicate, {'name': name, 'email': email}, all_rows=_all_rows)
 
     async def delete(_self, _key: int, /) -> None:
         await _self._delete((_key,))
@@ -190,6 +243,6 @@ class Client:
         self.users = UserRepository(database)
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[Client]:
+    async def transaction(self) -> _AsyncGenerator[Client]:
         async with self.database.transaction():
             yield Client(self.database)

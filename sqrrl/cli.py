@@ -12,7 +12,7 @@ from importlib import import_module
 from sqrrl.errors import SqrrlError
 from asyncio import run as run_async
 from sqrrl.generate import write as write_models
-from sqrrl.migrate import apply, baseline, check, custom, diff, load, status, write
+from sqrrl.migrate import adopt, apply, baseline, check, custom, diff, load, status, write
 
 @dataclass(frozen=True)
 class Config:
@@ -120,7 +120,7 @@ def _parser() -> ArgumentParser:
     generate.add_argument("--check", action="store_true", help="Fail if generated code is stale")
     migration = commands.add_parser("migrate", help="Create, verify, and apply migrations", suggest_on_error=True)
     actions = migration.add_subparsers(dest="action", required=True)
-    for name in ("diff", "custom", "check", "up", "status", "baseline"):
+    for name in ("diff", "custom", "check", "up", "status", "baseline", 'adopt'):
         action = actions.add_parser(name)
         action.add_argument("--config", type=Path, default=Path("sqrrl.json"))
         if name in ("diff", "custom"):
@@ -132,11 +132,14 @@ def _parser() -> ArgumentParser:
         if name == "custom":
             action.add_argument("--sql", type=Path, required=True)
 
-        if name in ("up", "status", "baseline"):
+        if name in ("up", "status", "baseline", 'adopt'):
             action.add_argument("--db", type=Path, required=True)
 
         if name == "baseline":
             action.add_argument("--version", type=int, required=True)
+
+        if name == 'adopt':
+            action.add_argument('--preserve-sql', type=Path, help='Reviewed CREATE statements for external history objects')
 
     return parser
 
@@ -178,6 +181,13 @@ async def _main(arguments: Optional[list[str]] = None) -> int:
                 elif args.action == "baseline":
                     await baseline(database, history, args.version)
                     print(f"Database validated and baselined at version {args.version}.")
+                elif args.action == 'adopt':
+                    if history:
+                        raise SqrrlError('Adoption requires an empty Sqrrl migration directory')
+                    preserved = (args.preserve_sql.read_text(encoding='utf-8'),) if args.preserve_sql else ()
+                    migration = await adopt(database, _load_schema(config), preserve_sql=preserved)
+                    print(f'Created {write(config.migrations, migration)}')
+                    print('Review the captured SQL, then run migrate baseline --version 1 with this database.')
                 else:
                     for item in await status(database, history):
                         state = "applied" if item.applied else "pending"

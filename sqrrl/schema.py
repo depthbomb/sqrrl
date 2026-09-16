@@ -32,6 +32,20 @@ class Index:
         object.__setattr__(self, "fields", tuple(self.fields))
 
 @dataclass(frozen=True)
+class Relationship:
+    """Explicit local-to-related column mapping, backed by a declared foreign key."""
+
+    name: str
+    table: str
+    fields: tuple[str, ...]
+    target: tuple[str, ...]
+    many: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, 'fields', tuple(self.fields))
+        object.__setattr__(self, 'target', tuple(self.target))
+
+@dataclass(frozen=True)
 class Field:
     name: str
     kind: str
@@ -42,6 +56,18 @@ class Field:
     is_immutable: bool = False
     default_sql: Optional[str] = None
     reference: Optional[ForeignKey] = None
+    codec: Optional[str] = None
+    python_type: Optional[str] = None
+    factory: Optional[str] = None
+    update_factory: Optional[str] = None
+
+    def default_factory(self, reference: str) -> Field:
+        """Use an importable module:callable on omission, before SQL defaults."""
+        return replace(self, factory=reference)
+
+    def on_update(self, reference: str) -> Field:
+        """Opt into an importable module:callable for omitted update values."""
+        return replace(self, update_factory=reference)
 
     @property
     def storage_type(self) -> str:
@@ -81,9 +107,10 @@ class Table:
     checks: tuple[Check, ...] = ()
     foreign_keys: tuple[ForeignKey, ...] = ()
     non_strict: bool = False
+    relationships: tuple[Relationship, ...] = ()
 
     def __post_init__(self) -> None:
-        for name in ("fields", "primary_key", "indexes", "checks", "foreign_keys"):
+        for name in ("fields", "primary_key", "indexes", "checks", "foreign_keys", 'relationships'):
             object.__setattr__(self, name, tuple(getattr(self, name)))
 
     @cached_property
@@ -204,6 +231,19 @@ class Schema:
                 if field.kind not in _STORAGE:
                     raise SchemaError(f"Unsupported field kind {field.kind!r}")
 
+                for python_reference in (field.codec, field.python_type, field.factory, field.update_factory):
+                    if python_reference is not None:
+                        _import_reference(python_reference)
+
+                if (field.kind == 'custom') != (field.codec is not None):
+                    raise SchemaError('Custom fields require a codec; other fields cannot declare one')
+
+                if (field.kind in ('custom', 'enum')) != (field.python_type is not None):
+                    raise SchemaError('Custom and enum fields require a Python type reference')
+
+                if field.update_factory is not None and (field.is_immutable or field.is_primary or field.name in table.primary_key):
+                    raise SchemaError('Immutable fields cannot have update factories')
+
                 if field.default_sql is not None and not _literal(field.default_sql):
                     raise SchemaError(f"{table.name}.{field.name}: defaults must be SQL literals")
 
@@ -252,6 +292,28 @@ class Schema:
 
         lookup = {table.name: table for table in normalized}
         for table in normalized:
+            relation_names = {field.name.lower() for field in table.fields}
+            for relation in table.relationships:
+                _identifier(relation.name)
+                _unique(relation_names, relation.name, 'relationship')
+                target = lookup.get(relation.table)
+                if target is None or not relation.fields or len(relation.fields) != len(relation.target):
+                    raise SchemaError('Invalid relationship mapping')
+
+                for source_name, target_name in zip(relation.fields, relation.target, strict=True):
+                    source_field = table.field(source_name)
+                    target_field = target.field(target_name)
+                    if (source_field.kind, source_field.codec, source_field.python_type) != (target_field.kind, target_field.codec, target_field.python_type):
+                        raise SchemaError('Relationship field kinds must match')
+
+                forward = _references(table, relation.fields, target.name, relation.target)
+                reverse = _references(target, relation.target, table.name, relation.fields)
+                if not forward and not reverse:
+                    raise SchemaError('Relationships require a declared foreign key')
+
+                if not relation.many and relation.target not in _unique_keys(target):
+                    raise SchemaError('Singular relationships require a unique target')
+
             references = table.foreign_keys + tuple(f.reference for f in table.fields if f.reference is not None)
             for reference in references:
                 if reference.on_delete not in ("NO ACTION", "RESTRICT", "CASCADE", "SET NULL", "SET DEFAULT"):
@@ -274,7 +336,7 @@ class Schema:
                 for source_name, target_name in zip(reference.fields, reference.target, strict=True):
                     source_field = table.field(source_name)
                     target_field = target.field(target_name)
-                    if source_field.kind != target_field.kind:
+                    if (source_field.kind, source_field.codec, source_field.python_type) != (target_field.kind, target_field.codec, target_field.python_type):
                         raise SchemaError("Foreign key field kinds must match")
 
                     if reference.on_delete == "SET NULL" and not source_field.is_nullable:
@@ -283,7 +345,17 @@ class Schema:
         return Schema(tuple(sorted(normalized, key=lambda table: table.name)))
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self.normalize())
+        data = asdict(self.normalize())
+        # Preserve checksums of metadata written before these optional features.
+        for table in data['tables']:
+            if not table['relationships']:
+                del table['relationships']
+            for field in table['fields']:
+                for name in ('codec', 'python_type', 'factory', 'update_factory'):
+                    if field[name] is None:
+                        del field[name]
+
+        return data
 
     @classmethod
     def _from_dict(cls, data: dict[str, Any]) -> Schema:
@@ -313,6 +385,7 @@ class Schema:
             values["indexes"] = tuple(_index(i) for i in _sequence(values.get("indexes", ())))
             values["checks"] = tuple(_check(c) for c in _sequence(values.get("checks", ())))
             values["foreign_keys"] = tuple(_foreign(f) for f in _sequence(values.get("foreign_keys", ())))
+            values['relationships'] = tuple(_relationship(r) for r in _sequence(values.get('relationships', ())))
             tables.append(Table(**values))
 
         return cls(tuple(tables)).normalize()
@@ -324,7 +397,8 @@ class Schema:
         except (TypeError, ValueError, KeyError, AttributeError) as error:
             raise SchemaError(f"Invalid schema metadata: {error}") from error
 
-_STORAGE = {"integer": "INTEGER", "text": "TEXT", "boolean": "INTEGER", "real": "REAL", "blob": "BLOB"}
+_STORAGE = {'integer': 'INTEGER', 'text': 'TEXT', 'boolean': 'INTEGER', 'real': 'REAL', 'blob': 'BLOB',
+            'datetime': 'TEXT', 'json': 'TEXT', 'enum': 'TEXT', 'custom': 'BLOB'}
 _CLIENT_MEMBERS = {"database", "transaction"}
 _RESERVED_SYMBOLS = {
     "Row",
@@ -357,6 +431,31 @@ _RESERVED_SYMBOLS = {
     "list",
     "tuple",
 }
+
+def _import_reference(value: str) -> None:
+    if not isinstance(value, str) or fullmatch(r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*', value) is None:
+        raise SchemaError('Python references must be module:public_symbol strings')
+
+    if any(iskeyword(part) for part in value.replace(':', '.').split('.')):
+        raise SchemaError('Python references cannot contain keywords')
+
+def _relationship(data: dict[str, Any]) -> Relationship:
+    _record_types(data, strings=('name', 'table'), booleans=('many',))
+    values = dict(data)
+    values['fields'] = _strings(data['fields'])
+    values['target'] = _strings(data['target'])
+
+    return Relationship(**values)
+
+def _unique_keys(table: Table) -> set[tuple[str, ...]]:
+    return {tuple(f.name for f in table.keys)} | {(f.name,) for f in table.fields if f.is_unique} | {
+        i.fields for i in table.indexes if i.unique and i.where is None
+    }
+
+def _references(table: Table, fields: tuple[str, ...], target: str, columns: tuple[str, ...]) -> bool:
+    references = table.foreign_keys + tuple(f.reference for f in table.fields if f.reference is not None)
+
+    return any(r.fields == fields and r.table == target and r.target == columns for r in references)
 
 def _foreign(data: dict[str, Any]) -> ForeignKey:
     _record_types(data, strings=("table", "on_delete"))
@@ -448,3 +547,19 @@ def real(name: str) -> Field:
 
 def blob(name: str) -> Field:
     return Field(name, "blob")
+
+def datetime(name: str) -> Field:
+    """Aware datetimes stored as UTC ISO text with six fractional digits."""
+    return Field(name, 'datetime')
+
+def json(name: str) -> Field:
+    """JSON values stored as validated canonical text; None always means SQL NULL."""
+    return Field(name, 'json')
+
+def enum(name: str, python_type: str) -> Field:
+    """Enum members stored by name, using an importable module:Enum reference."""
+    return Field(name, 'enum', python_type=python_type)
+
+def custom(name: str, python_type: str, codec: str) -> Field:
+    """A Python type with an importable Codec instance encoding to bytes."""
+    return Field(name, 'custom', python_type=python_type, codec=codec)

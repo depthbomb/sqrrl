@@ -6,6 +6,7 @@ from sqrrl.schema import Schema, quote
 from aiosqlite import Connection, connect
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
+from sqrrl.structure import compare, tokens
 from typing import Any, AsyncIterator, Optional
 from sqrrl.errors import MigrationError, SchemaError
 from sqlite3 import DatabaseError, complete_statement
@@ -33,9 +34,12 @@ class Migration:
     statements: tuple[str, ...]
     checksum: str = ""
     format: int = 1
+    structural: bool = False
+    preserve_sql: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "statements", tuple(self.statements))
+        object.__setattr__(self, 'preserve_sql', tuple(self.preserve_sql))
 
     @property
     def sql(self) -> str:
@@ -46,7 +50,7 @@ class Migration:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "format": self.format,
             "version": self.version,
             "name": self.name,
@@ -57,6 +61,12 @@ class Migration:
             "statements": list(self.statements),
             "checksum": self.checksum,
         }
+        if self.structural:
+            data['structural'] = True
+        if self.preserve_sql:
+            data['preserve_sql'] = list(self.preserve_sql)
+
+        return data
 
 @dataclass(frozen=True)
 class Status:
@@ -93,6 +103,8 @@ def _validate(history: tuple[Migration, ...]) -> None:
     before = _digest([])
     for version, migration in enumerate(history, 1):
         _validate_migration(migration)
+        if migration.structural != history[0].structural or migration.preserve_sql != history[0].preserve_sql:
+            raise MigrationError('Adoption metadata must remain unchanged throughout history')
         if migration.version != version:
             raise MigrationError("Invalid migration format, version, or name")
 
@@ -103,6 +115,12 @@ def _validate(history: tuple[Migration, ...]) -> None:
         before = migration.after
 
 def _validate_migration(migration: Migration) -> None:
+    if type(migration.structural) is not bool or (migration.preserve_sql and not migration.structural):
+        raise MigrationError('Invalid adoption metadata')
+
+    for statement in migration.preserve_sql:
+        if not isinstance(statement, str) or any(tokens(part)[:2] not in (('create', 'table'), ('create', 'index'), ('create', 'unique')) for part in _split(statement)):
+            raise MigrationError('Preserved objects must be explicitly supplied CREATE TABLE or INDEX statements')
     if (
             type(migration.format) is not int
             or migration.format != 1
@@ -281,6 +299,12 @@ def _plan(previous: Schema, desired: Schema, allow_drop: bool) -> tuple[str, ...
             index_creates.extend(table.index_sql())
             continue
 
+        prior_fields = {f.key: f for f in old.fields}
+        for field in table.fields:
+            prior = prior_fields.get(field.key)
+            if prior is not None and (field.kind, field.codec, field.python_type) != (prior.kind, prior.codec, prior.python_type):
+                raise MigrationError(f'{table.name}.{field.name}: automatic representation changes are unsupported')
+
         if table.create_sql() == old.create_sql():
             old_indexes = {index.name: sql for index, sql in zip(old.indexes, old.index_sql(), strict=True)}
             new_indexes = {index.name: sql for index, sql in zip(table.indexes, table.index_sql(), strict=True)}
@@ -346,7 +370,9 @@ def _new(
         )
 
     migration = Migration(
-            len(history) + 1, name, history[-1].checksum if history else "", before, after, schema, statements
+            len(history) + 1, name, history[-1].checksum if history else "", before, after, schema, statements,
+            structural=history[0].structural if history else False,
+            preserve_sql=history[0].preserve_sql if history else (),
     )
 
     return replace(migration, checksum=_checksum(migration))
@@ -455,8 +481,13 @@ async def diff(
             for statement in table.index_sql():
                 await _execute_sql(expected.connection, statement)
 
+        if history and history[0].preserve_sql:
+            await _execute(expected.connection, history[0].preserve_sql)
+
         if not statements:
-            return None
+            if previous.to_dict() == desired.to_dict():
+                return None
+            statements = ('SELECT 1;',)
 
         before = await _fingerprint(replay.connection)
         async with _migration_transaction(replay) as connection:
@@ -465,7 +496,10 @@ async def diff(
 
         after = await _fingerprint(replay.connection)
         if after != await _fingerprint(expected.connection):
-            raise MigrationError("Candidate migration does not reproduce the declared schema")
+            if history and history[0].structural:
+                await compare(replay.connection, expected.connection)
+            else:
+                raise MigrationError("Candidate migration does not reproduce the declared schema")
 
         migration = _new(history, desired, name, statements, before, after)
 
@@ -513,6 +547,44 @@ async def baseline(database: Database, history: tuple[Migration, ...], version: 
         await _execute_sql(connection, _LEDGER.replace('CREATE TABLE "', 'CREATE TABLE IF NOT EXISTS main."', 1))
         for migration in history[:version]:
             await _record(connection, migration)
+
+async def adopt(
+        database: Database, schema: Schema, name: str = 'adopted', *, preserve_sql: tuple[str, ...] = ()
+) -> Migration:
+    """Prepare a checked initial migration without changing the source database.
+
+    Supply reviewed CREATE statements for any external history tables/indexes
+    to preserve. Write this migration, then use baseline(..., version=1).
+    The captured DDL retains an exact drift fingerprint for future operations.
+    """
+    desired = schema.normalize()
+    async with _scratch() as expected:
+        for table in desired.tables:
+            await _execute_sql(expected.connection, table.create_sql())
+            for statement in table.index_sql():
+                await _execute_sql(expected.connection, statement)
+        for statement in preserve_sql:
+            if any(tokens(part)[:2] not in (('create', 'table'), ('create', 'index'), ('create', 'unique')) for part in _split(statement)):
+                raise MigrationError('Preserved objects require reviewed CREATE statements')
+        await _execute(expected.connection, preserve_sql)
+        async with database.transaction():
+            connection = database.connection
+            async with _cursor(connection, "SELECT 1 FROM main.sqlite_schema WHERE name = 'sqrrl_migrations'") as cursor:
+                if await cursor.fetchone() is not None:
+                    raise MigrationError('Adoption requires a database without Sqrrl history')
+            await compare(connection, expected.connection)
+            await _foreign_keys_valid(connection)
+            objects = await _objects(connection)
+            # Tables precede indexes; foreign keys are checked after replay.
+            statements = tuple(row[3] + ';' for row in sorted(objects, key=lambda row: (row[0] != 'table', row[1])))
+            migration = _new((), desired, name, statements, _digest([]), await _fingerprint(connection))
+            migration = replace(migration, structural=True, preserve_sql=preserve_sql)
+            migration = replace(migration, checksum=_checksum(migration))
+
+    async with _scratch() as replay:
+        await apply(replay, (migration,))
+
+    return migration
 
 async def custom(history: tuple[Migration, ...], name: str, sql: str) -> Migration:
     """Record a data-only SQL backfill. Custom schema objects are not supported yet."""
