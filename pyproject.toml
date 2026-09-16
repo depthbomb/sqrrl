@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sqrrl"
-version = "0.2.0"
+version = "0.3.0"
 description = "Generated typed async data access and checked migrations for SQLite"
 readme = "README.md"
 requires-python = ">=3.14"
