@@ -1,7 +1,8 @@
-from json import dumps
 from os import environ
+from re import findall
 from pathlib import Path
 from subprocess import run
+from json import dumps, loads
 from dataclasses import replace
 from sqrrl.generate import write
 from sys import executable, prefix
@@ -286,8 +287,9 @@ def test_feature_typing(tmp_path, schema, checker):
     consumer.write_text(
         """from typing import assert_type
 from datetime import datetime
+from sqrrl.runtime import LoadPath, Query
 from sqrrl import Conflict, Database, Increment, Unloaded
-from models import Book, BookCreate, BookColumns, BookRelations, ShelfRelations, Client
+from models import Book, BookCreate, BookColumns, BookRelations, Shelf, Sign, ShelfRelations, Client
 from examples.library_types import Binding, Label
 
 async def valid(db: Database) -> None:
@@ -300,11 +302,25 @@ async def valid(db: Database) -> None:
     books = await client.books.query().load(BookRelations.location).all()
     if not isinstance(books[0].location, Unloaded) and books[0].location is not None:
         assert_type(books[0].location.room, str)
+    path = BookRelations.location.then(ShelfRelations.sign)
+    assert_type(path, LoadPath[Book, Sign])
+    assert_type(client.books.query().load(path), Query[Book])
+    nested = await client.books.query().load(path, BookRelations.location).all()
+    assert_type(nested, list[Book])
+    if not isinstance(nested[0].location, Unloaded) and nested[0].location is not None:
+        assert_type(nested[0].location, Shelf)
+        if not isinstance(nested[0].location.sign, Unloaded) and nested[0].location.sign is not None:
+            assert_type(nested[0].location.sign, Sign)
+    cycle = ShelfRelations.books.then(BookRelations.location).then(ShelfRelations.books)
+    assert_type(cycle, LoadPath[Shelf, Book])
+    shelves = await client.shelves.query().load(cycle).all()
+    if not isinstance(shelves[0].books, Unloaded):
+        assert_type(shelves[0].books, list[Book])
     await client.shelves.query().where(ShelfRelations.books.exists(BookColumns.title.contains('%'))).all()
 """,
         encoding='utf-8',
     )
-    command = [executable, '-m', checker] + (['--strict', '--no-incremental'] if checker == 'mypy' else [])
+    command = [executable, '-m', checker] + (['--strict', '--no-incremental'] if checker == 'mypy' else ['--outputjson'])
     environment = dict(environ) | {'MYPYPATH': str(root)}
     collisions = Schema(
         schema.tables
@@ -348,9 +364,23 @@ async def invalid(db: Database) -> None:
     client.books.query().load(ShelfRelations.books)
     ShelfRelations.books.exists(BookColumns.copies.contains('bad'))
     BookCreate(isbn='x', title='x', binding='PAPER')
+    BookRelations.location.then(BookRelations.location)  # reject
+    BookRelations.location.then(ShelfRelations.books).then(ShelfRelations.sign)  # reject
+    client.books.query().load(ShelfRelations.books.then(BookRelations.location))  # reject
+    BookRelations.location.then(BookColumns.title)  # reject
+    client.books.query().load('location.sign')  # reject
 """,
         encoding='utf-8',
     )
     result = run(command + [str(consumer)], cwd=tmp_path, env=environment, capture_output=True, text=True)
     assert result.returncode != 0
-    assert result.stdout.count('error') >= 6, result.stdout
+    expected = {number for number, line in enumerate(consumer.read_text().splitlines(), 1) if '# reject' in line}
+    if checker == 'mypy':
+        rejected = {int(number) for number in findall(r'consumer\.py:(\d+): error:', result.stdout)}
+    else:
+        rejected = {
+            item['range']['start']['line'] + 1
+            for item in loads(result.stdout)['generalDiagnostics']
+            if item['severity'] == 'error'
+        }
+    assert expected <= rejected and len(rejected) >= 11, result.stdout

@@ -5,7 +5,7 @@ from examples.library_schema import schema
 from sqrrl.migrate import apply, check, diff
 from examples.library_types import Binding, Label
 from sqrrl import Conflict, Database, Increment, Unloaded
-from examples.library_models import BookColumns, BookCreate, Client, ShelfRelations
+from examples.library_models import BookColumns, BookCreate, BookRelations, Client, ShelfRelations
 
 
 async def main() -> None:
@@ -20,6 +20,7 @@ async def main() -> None:
             await apply(database, (migration,))
             client = Client(database)
             await client.shelves.create(room='East', number=1, name='Reference')
+            await client.signs.create(room='East', shelf=1, caption='Reference books')
             await client.books.create_many(
                 [
                     BookCreate(
@@ -48,6 +49,17 @@ async def main() -> None:
             for shelf in shelves:
                 assert not isinstance(shelf.books, Unloaded)
                 print(f'{shelf.name}: {", ".join(book.title for book in shelf.books)}')
+
+            # Book -> optional location -> optional sign, fetched in three queries.
+            # Each then() checks that the next relationship belongs to the target model.
+            books = await client.books.query().load(BookRelations.location.then(ShelfRelations.sign)).all()
+            for book in books:
+                location = book.location
+                if isinstance(location, Unloaded) or location is None:
+                    continue
+                sign = location.sign
+                if not isinstance(sign, Unloaded) and sign is not None:
+                    print(f'{book.title}: {sign.caption}')
 
 
 if __name__ == '__main__':

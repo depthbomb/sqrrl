@@ -401,7 +401,7 @@ class Query(Generic[M]):
     ordering: tuple[Order[M], ...] = ()
     row_limit: Optional[int] = None
     row_offset: int = 0
-    loading: tuple[Related[M, Any], ...] = ()
+    loading: tuple[Related[M, Any] | LoadPath[M, Any], ...] = ()
 
     def _sql(self, projection: str, *, count: bool = False) -> tuple[str, tuple[object, ...]]:
         query = f"SELECT {projection} FROM main.{quote(self.table.name)}"
@@ -448,9 +448,17 @@ class Query(Generic[M]):
 
         return replace(self, row_offset=count)
 
-    def load(self, *relations: Related[M, Any]) -> Query[M]:
-        if any(relation.model is not self.model for relation in relations):
-            raise ValidationError('Relationship belongs to another model')
+    def load(self, *relations: Related[M, Any] | LoadPath[M, Any]) -> Query[M]:
+        """Load relationships or typed paths built with ``relation.then(next)``.
+
+        Shared prefixes are fetched once per key batch, within one read snapshot.
+        Only the explicit paths are followed, including for self relationships.
+        """
+        for relation in relations:
+            if not isinstance(relation, (Related, LoadPath)):
+                raise ValidationError('Expected a relationship or load path')
+            if relation.model is not self.model:
+                raise ValidationError('Relationship belongs to another model')
 
         return replace(self, loading=self.loading + relations)
 
@@ -460,8 +468,15 @@ class Query(Generic[M]):
         if self.loading:
             async with self.database.read_connection() as connection:
                 rows = [self.decoder(row) for row in await _fetch_all(connection, sql, arguments)]
-                for relation in self.loading:
-                    rows = await relation._load(connection, rows)
+                nodes: dict[str, _LoadNode] = {}
+                for selection in self.loading:
+                    branch = nodes
+                    path = selection.relations if isinstance(selection, LoadPath) else (selection,)
+                    for relation in path:
+                        node = branch.setdefault(relation.name, _LoadNode(relation, {}))
+                        branch = node.children
+                for node in nodes.values():
+                    rows = await node.relation._load(connection, rows, node.children)
 
                 return rows
 
@@ -510,6 +525,13 @@ class Related(Generic[M, R]):
     target: tuple[str, ...]
     many: bool = False
 
+    def then(self, relation: Related[R, T]) -> LoadPath[M, T]:
+        """Append a relationship belonging to this relationship's target model."""
+        if not isinstance(relation, Related):
+            raise ValidationError('Expected a relationship in load path')
+
+        return LoadPath(self.model, relation.related_model, (self, relation))
+
     def exists(self, *predicates: Predicate[R]) -> Predicate[M]:
         if any(predicate.model is not self.related_model for predicate in predicates):
             raise ValidationError('Related predicate belongs to another model')
@@ -531,12 +553,18 @@ class Related(Generic[M, R]):
 
         return Predicate(self.model, expression, tuple(arg for p in predicates for arg in p.arguments))
 
-    async def _load(self, connection: Connection, parents: list[M]) -> list[M]:
+    async def _load(
+            self, connection: Connection, parents: list[M], children: Optional[dict[str, _LoadNode]] = None
+    ) -> list[M]:
         keys = list(dict.fromkeys(tuple(getattr(row, name) for name in self.fields) for row in parents))
         keys = [key for key in keys if all(value is not None for value in key)]
         width = len(self.target)
-        size = max(1, (await _parameter_limit(connection)) // width)
-        groups: dict[tuple[object, ...], list[R]] = {}
+        limit = await _parameter_limit(connection)
+        if keys and width > limit:
+            raise ValidationError('Relationship key exceeds the SQLite parameter limit')
+
+        size = max(1, limit // width)
+        related: list[R] = []
         for start in range(0, len(keys), size):
             batch = keys[start:start + size]
             arguments = tuple(encode(self.table.field(name), value) for key in batch for name, value in zip(self.target, key, strict=True))
@@ -544,10 +572,16 @@ class Related(Generic[M, R]):
             placeholders = ', '.join('(' + ', '.join('?' for _ in self.target) + ')' for _ in batch)
             order = ', '.join(quote(field.name) for field in self.table.keys)
             sql = f'SELECT * FROM main.{quote(self.table.name)} WHERE ({columns}) IN (VALUES {placeholders}) ORDER BY {order}'
-            for row in await _fetch_all(connection, sql, arguments):
-                decoded = self.decoder(row)
-                key = tuple(getattr(decoded, name) for name in self.target)
-                groups.setdefault(key, []).append(decoded)
+            related.extend(self.decoder(row) for row in await _fetch_all(connection, sql, arguments))
+
+        if related and children:
+            for node in children.values():
+                related = await node.relation._load(connection, related, node.children)
+
+        groups: dict[tuple[object, ...], list[R]] = {}
+        for decoded in related:
+            key = tuple(getattr(decoded, name) for name in self.target)
+            groups.setdefault(key, []).append(decoded)
 
         results = []
         for parent in parents:
@@ -560,6 +594,39 @@ class Related(Generic[M, R]):
             results.append(cast(M, replace(cast(Any, parent), **{self.name: value})))
 
         return results
+
+@dataclass(frozen=True)
+class LoadPath(Generic[M, R]):
+    """A finite typed relationship path, created with ``Related.then()``."""
+
+    model: type[M]
+    related_model: type[R]
+    relations: tuple[Related[Any, Any], ...]
+
+    def __post_init__(self) -> None:
+        if not self.relations or any(not isinstance(relation, Related) for relation in self.relations):
+            raise ValidationError('Load path requires relationships')
+
+        expected: type[Any] = self.model
+        for relation in self.relations:
+            if relation.model is not expected:
+                raise ValidationError('Load path relationship belongs to another model')
+            expected = relation.related_model
+
+        if expected is not self.related_model:
+            raise ValidationError('Load path target belongs to another model')
+
+    def then(self, relation: Related[R, T]) -> LoadPath[M, T]:
+        """Append a relationship belonging to the last target model."""
+        if not isinstance(relation, Related):
+            raise ValidationError('Expected a relationship in load path')
+
+        return LoadPath(self.model, relation.related_model, self.relations + (relation,))
+
+@dataclass
+class _LoadNode:
+    relation: Related[Any, Any]
+    children: dict[str, _LoadNode]
 
 class Repository(Generic[M]):
     def __init__(self, database: Database, table: Table, model: type[M], decoder: Callable[[Row], M]) -> None:
