@@ -7,11 +7,11 @@ from aiosqlite import Connection, connect
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from sqrrl.structure import compare, tokens
-from typing import Any, AsyncIterator, Optional
-from sqrrl.errors import MigrationError, SchemaError
 from sqlite3 import DatabaseError, complete_statement
 from sqrrl.runtime import _cursor, _execute_sql, _settle
+from sqrrl.errors import MigrationError, SchemaError, SqrrlError
 from re import DOTALL, compile as compile_pattern, fullmatch, match
+from typing import Any, AsyncIterator, Awaitable, Optional, TypeVar
 from sqlite3 import (
     SQLITE_OK,
     SQLITE_DENY,
@@ -36,6 +36,7 @@ class Migration:
     format: int = 1
     structural: bool = False
     preserve_sql: tuple[str, ...] = ()
+    dialect: str = 'sqlite'
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "statements", tuple(self.statements))
@@ -61,6 +62,8 @@ class Migration:
             "statements": list(self.statements),
             "checksum": self.checksum,
         }
+        if self.dialect != 'sqlite':
+            data['dialect'] = self.dialect
         if self.structural:
             data['structural'] = True
         if self.preserve_sql:
@@ -73,6 +76,8 @@ class Status:
     version: int
     name: str
     applied: bool
+
+_PG_RESULT = TypeVar('_PG_RESULT')
 
 _LEDGER = 'CREATE TABLE "sqrrl_migrations" (version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, fingerprint TEXT NOT NULL) STRICT'
 _FORBIDDEN = {SQLITE_ATTACH, SQLITE_DETACH, SQLITE_PRAGMA, SQLITE_SAVEPOINT, SQLITE_TRANSACTION}
@@ -103,6 +108,8 @@ def _validate(history: tuple[Migration, ...]) -> None:
     before = _digest([])
     for version, migration in enumerate(history, 1):
         _validate_migration(migration)
+        if migration.dialect != history[0].dialect:
+            raise MigrationError('Migration dialect must remain unchanged throughout history')
         if migration.structural != history[0].structural or migration.preserve_sql != history[0].preserve_sql:
             raise MigrationError('Adoption metadata must remain unchanged throughout history')
         if migration.version != version:
@@ -115,11 +122,19 @@ def _validate(history: tuple[Migration, ...]) -> None:
         before = migration.after
 
 def _validate_migration(migration: Migration) -> None:
+    if migration.dialect not in ('sqlite', 'postgresql'):
+        raise MigrationError('Unknown migration dialect')
     if type(migration.structural) is not bool or (migration.preserve_sql and not migration.structural):
         raise MigrationError('Invalid adoption metadata')
 
     for statement in migration.preserve_sql:
-        if not isinstance(statement, str) or any(tokens(part)[:2] not in (('create', 'table'), ('create', 'index'), ('create', 'unique')) for part in _split(statement)):
+        if migration.dialect == 'postgresql':
+            from sqrrl.postgres import preserved_sql
+
+            valid = isinstance(statement, str) and preserved_sql(statement)
+        else:
+            valid = isinstance(statement, str) and all(tokens(part)[:2] in (('create', 'table'), ('create', 'index'), ('create', 'unique')) for part in _split(statement))
+        if not valid:
             raise MigrationError('Preserved objects must be explicitly supplied CREATE TABLE or INDEX statements')
     if (
             type(migration.format) is not int
@@ -441,9 +456,43 @@ def write(directory: str | Path, migration: Migration) -> Path:
 
     return path / (base + ".sql")
 
+async def _postgres_call(action: Awaitable[_PG_RESULT]) -> _PG_RESULT:
+    try:
+        return await action
+    except SqrrlError:
+        raise
+    except Exception as error:
+        from asyncpg import PostgresError
+        if isinstance(error, PostgresError):
+            raise MigrationError(f'PostgreSQL migration failed: {error}') from error
+        raise
+
+
+def _validate_sqlite(history: tuple[Migration, ...]) -> None:
+    _validate(history)
+    if any(m.dialect != 'sqlite' for m in history):
+        raise MigrationError('SQLite requires SQLite migration history')
+
+
+def _postgres_dialect(history: tuple[Migration, ...], dialect: str, dsn: Optional[str]) -> bool:
+    if dialect not in ('sqlite', 'postgresql'):
+        raise MigrationError(f'Unknown dialect: {dialect}')
+    return dialect == 'postgresql' or dsn is not None or bool(history and history[0].dialect == 'postgresql')
+
+
+def _require_dsn(dsn: Optional[str]) -> str:
+    if not dsn or not dsn.startswith(('postgresql://', 'postgres://')):
+        raise MigrationError('PostgreSQL migration replay requires a PostgreSQL DSN (--db or SQRRL_DATABASE_URL)')
+    return dsn
+
+
 async def apply(database: Database, history: tuple[Migration, ...]) -> None:
     """Apply all pending migrations and ledger records as one atomic batch."""
-    _validate(history)
+    if database.dialect == 'postgresql':
+        from sqrrl.pg_migrate import apply as pg_apply
+        await _postgres_call(pg_apply(database, history))
+        return
+    _validate_sqlite(history)
     try:
         async with _migration_transaction(database) as connection:
             count = await _applied(connection, history)
@@ -463,15 +512,18 @@ async def apply(database: Database, history: tuple[Migration, ...]) -> None:
         raise MigrationError(f"Migration failed: {error}") from error
 
 async def diff(
-        history: tuple[Migration, ...], schema: Schema, name: str, *, allow_drop: bool = False
+        history: tuple[Migration, ...], schema: Schema, name: str, *, allow_drop: bool = False, dialect: str = 'sqlite', dsn: Optional[str] = None
 ) -> Optional[Migration]:
     if not fullmatch(r"[a-z][a-z0-9_]*", name):
         raise MigrationError(
                 "Migration names must start with a lowercase letter and use letters, digits, or underscores"
         )
 
+    if _postgres_dialect(history, dialect, dsn):
+        from sqrrl.pg_migrate import diff as pg_diff
+        return await _postgres_call(pg_diff(history, schema, name, dsn=_require_dsn(dsn), allow_drop=allow_drop))
     desired = schema.normalize()
-    _validate(history)
+    _validate_sqlite(history)
     previous = history[-1].schema if history else Schema(())
     statements = _plan(previous, desired, allow_drop)
     async with _scratch() as replay, _scratch() as expected:
@@ -508,13 +560,16 @@ async def diff(
 
     return migration
 
-async def check(history: tuple[Migration, ...], schema: Schema) -> None:
-    if await diff(history, schema, "check") is not None:
+async def check(history: tuple[Migration, ...], schema: Schema, *, dialect: str = 'sqlite', dsn: Optional[str] = None) -> None:
+    if await diff(history, schema, 'check', dialect=dialect, dsn=dsn) is not None:
         raise MigrationError("Schema changes have no migration; run sqrrl migrate diff NAME")
 
 async def status(database: Database, history: tuple[Migration, ...]) -> tuple[Status, ...]:
     """Inspect history and drift without creating a ledger."""
-    _validate(history)
+    if database.dialect == 'postgresql':
+        from sqrrl.pg_migrate import status as pg_status
+        return await _postgres_call(pg_status(database, history))
+    _validate_sqlite(history)
     async with database.transaction():
         count = await _applied(database.connection, history)
         expected = history[count - 1].after if count else _digest([])
@@ -525,7 +580,11 @@ async def status(database: Database, history: tuple[Migration, ...]) -> tuple[St
 
 async def baseline(database: Database, history: tuple[Migration, ...], version: int) -> None:
     """Adopt an exact schema match. Equivalent but differently written DDL is rejected."""
-    _validate(history)
+    if database.dialect == 'postgresql':
+        from sqrrl.pg_migrate import baseline as pg_baseline
+        await _postgres_call(pg_baseline(database, history, version))
+        return
+    _validate_sqlite(history)
     if type(version) is not int or not 1 <= version <= len(history):
         raise MigrationError("Baseline version is outside the supplied history")
 
@@ -557,6 +616,9 @@ async def adopt(
     to preserve. Write this migration, then use baseline(..., version=1).
     The captured DDL retains an exact drift fingerprint for future operations.
     """
+    if database.dialect == 'postgresql':
+        from sqrrl.pg_migrate import adopt as pg_adopt
+        return await _postgres_call(pg_adopt(database, schema, name, preserve_sql=preserve_sql))
     desired = schema.normalize()
     async with _scratch() as expected:
         for table in desired.tables:
@@ -586,9 +648,12 @@ async def adopt(
 
     return migration
 
-async def custom(history: tuple[Migration, ...], name: str, sql: str) -> Migration:
+async def custom(history: tuple[Migration, ...], name: str, sql: str, *, dialect: str = 'sqlite', dsn: Optional[str] = None) -> Migration:
     """Record a data-only SQL backfill. Custom schema objects are not supported yet."""
-    _validate(history)
+    if _postgres_dialect(history, dialect, dsn):
+        from sqrrl.pg_migrate import custom as pg_custom
+        return await _postgres_call(pg_custom(history, name, sql, dsn=_require_dsn(dsn)))
+    _validate_sqlite(history)
     statements = _split(sql)
     if not statements:
         raise MigrationError("Custom migration is empty")

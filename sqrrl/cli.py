@@ -1,3 +1,4 @@
+from os import environ
 from pathlib import Path
 from subprocess import run
 from typing import Optional
@@ -110,7 +111,7 @@ def _initialize(path: Path) -> None:
 
 def _parser() -> ArgumentParser:
     parser = ArgumentParser(
-            prog="sqrrl", description="Generated typed access and checked SQLite migrations", suggest_on_error=True
+            prog="sqrrl", description="Generated typed access and checked SQLite/PostgreSQL migrations", suggest_on_error=True
     )
     commands = parser.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init", help="Create a starter schema and configuration")
@@ -132,8 +133,8 @@ def _parser() -> ArgumentParser:
         if name == "custom":
             action.add_argument("--sql", type=Path, required=True)
 
-        if name in ("up", "status", "baseline", 'adopt'):
-            action.add_argument("--db", type=Path, required=True)
+        action.add_argument('--db', default=environ.get('SQRRL_DATABASE_URL'), help='SQLite path or PostgreSQL DSN; defaults to SQRRL_DATABASE_URL')
+        action.add_argument('--dialect', choices=('sqlite', 'postgresql'), default='sqlite')
 
         if name == "baseline":
             action.add_argument("--version", type=int, required=True)
@@ -159,18 +160,23 @@ async def _main(arguments: Optional[list[str]] = None) -> int:
             return 0
 
         history = load(config.migrations)
+        dsn = args.db if args.db and args.db.startswith(('postgresql://', 'postgres://')) else None
+        if (args.dialect == 'postgresql' or (history and history[0].dialect == 'postgresql')) and dsn is None:
+            raise SqrrlError('PostgreSQL migrations require a PostgreSQL DSN via --db or SQRRL_DATABASE_URL')
+        if args.action in ('up', 'status', 'baseline', 'adopt') and not args.db:
+            raise SqrrlError('Supply --db or set SQRRL_DATABASE_URL')
         if args.action == "diff":
-            migration = await diff(history, _load_schema(config), args.name, allow_drop=args.allow_drop)
+            migration = await diff(history, _load_schema(config), args.name, allow_drop=args.allow_drop, dialect=args.dialect, dsn=dsn)
             if migration is None:
                 print("No schema changes.")
             else:
                 print(f"Created {write(config.migrations, migration)}")
                 print("Review the SQL before applying it.")
         elif args.action == "custom":
-            migration = await custom(history, args.name, args.sql.read_text(encoding="utf-8"))
+            migration = await custom(history, args.name, args.sql.read_text(encoding="utf-8"), dialect=args.dialect, dsn=dsn)
             print(f"Created {write(config.migrations, migration)}")
         elif args.action == "check":
-            await check(history, _load_schema(config))
+            await check(history, _load_schema(config), dialect=args.dialect, dsn=dsn)
             print("Migration history replays successfully and matches the schema.")
         else:
             opener = Database.create if args.action == "up" else Database.open

@@ -1,13 +1,13 @@
 # sqrrl (pronounced squirrel)
 
-Typed async SQLite access, generated from a Python schema, with easy migration management.
+Typed async SQLite and PostgreSQL access, generated from a Python schema, with checked migrations.
 
 Describe your tables once, and sqrrl generates dataclasses, repositories, and
 column helpers with real type annotations. Your editor knows which fields a
 query returns and which arguments a write accepts. Database calls run through
-`aiosqlite`.
+`aiosqlite` for SQLite or native `asyncpg` for PostgreSQL.
 
-Requires **Python 3.14+** and **SQLite 3.37+**. This is an early release, and the
+Requires **Python 3.14+**, with **SQLite 3.37+** or **PostgreSQL 15+**. This is an early release, and the
 API is still taking shape.
 
 ## Getting started
@@ -73,6 +73,43 @@ pending migrations.
 
 You can use `python -m sqrrl` anywhere you'd use `sqrrl`.
 
+## PostgreSQL
+
+Install the extra to use the same schemas, generated models, and repository API
+with native async `asyncpg` connections:
+
+```sh
+python -m pip install 'sqrrl[pg]'
+```
+
+Set `SQRRL_DATABASE_URL` to an existing database, such as
+`postgresql://app@localhost/app`, and open it in your app:
+
+```python
+from os import environ
+from sqrrl import Database
+from models import Client
+
+async with await Database.open(environ['SQRRL_DATABASE_URL']) as database:
+    client = Client(database)
+    note = await client.notes.create(title='Try PostgreSQL')
+```
+
+The same [migration commands](#changing-the-database) work with PostgreSQL.
+The CLI reads `SQRRL_DATABASE_URL`, or you can pass `--db POSTGRESQL_URL`.
+Keep a separate migration directory for each backend.
+
+A few PostgreSQL specifics:
+
+- Tables live in `public`. Neither `Database.open()` nor `Database.create()`
+  creates the database itself.
+- `diff`, `check`, `custom`, `adopt`, and `baseline` need `CREATEDB` permission
+  to replay migrations in temporary databases. `up` and `status` don't.
+- Fields use portable storage, including text for JSON and datetimes.
+  PostgreSQL-native arrays, JSONB operators, and custom SQL types aren't exposed.
+- For native SQL, use `database.connection.raw` inside a transaction with
+  asyncpg's `$1` parameters. `wal`, `immediate`, and `non_strict` are SQLite-only.
+
 ## Defining a schema
 
 A schema is a regular Python object. Here's the notes table from the starter:
@@ -98,7 +135,7 @@ schema = Schema(
 The field helpers are `integer`, `text`, `boolean`, `real`, and `blob`. Fields
 are required unless you add `.nullable()`. You can also declare unique fields,
 foreign keys, immutable fields, indexes, checks, and composite primary keys.
-Tables use SQLite's `STRICT` mode.
+SQLite tables use `STRICT` mode; PostgreSQL tables use regular typed columns.
 
 Defaults are **SQL expressions**, so `.default('0')` stores zero and
 `.default("'draft'")` stores the text `draft`. `.immutable()` leaves a field out
@@ -254,3 +291,18 @@ python -m twine check --strict dist/release/*
 The example uses a temporary database and cleans up after itself. The
 `benchmarks/` directory has separate runners for database operations and import
 overhead.
+
+For PostgreSQL development, install `.[dev,pg]` and set `SQRRL_TEST_POSTGRES`
+to a local test server URL whose role has `CREATEDB`. Then run
+`python -m pytest tests/test_postgres.py`. The tests create and remove isolated
+databases. They skip when that environment variable is absent. With PostgreSQL
+configured, `python -m pytest --cov=sqrrl --cov-branch --cov-fail-under=98` checks
+coverage for both backends, including CLI subprocesses. CI runs this check against
+PostgreSQL 15 and 18 alongside the cross-platform SQLite checks.
+Run `python -m pytest tests/test_postgres.py -m stress` for the optional large
+relationship-loading test, which is excluded from normal runs.
+`python benchmarks/bench_postgres.py` uses the same variable to measure bulk
+writes and typed reads, with a native asyncpg read included for comparison.
+`python benchmarks/bench_postgres_pass.py --output PATH` measures migration status
+on 30 tables, repeated updates, cursor reads, and bulk inserts. It records warmed
+sample timings and medians as JSON; `--source-root` selects a checkout to compare.

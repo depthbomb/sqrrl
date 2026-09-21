@@ -12,6 +12,40 @@ permissions:
   contents: read
 
 jobs:
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        postgres: ['15', '18']
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_USER: sqrrl
+          POSTGRES_PASSWORD: sqrrl_test
+          POSTGRES_DB: sqrrl
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SQRRL_TEST_POSTGRES: postgresql://sqrrl:sqrrl_test@localhost:5432/sqrrl
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: python -m venv .venv
+      - run: .venv/bin/python -m pip install -e '.[dev,pg]'
+      - name: Test both backends and enforce coverage
+        run: .venv/bin/python -m pytest --cov=sqrrl --cov-branch --cov-fail-under=98
+
   test:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15

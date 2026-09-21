@@ -78,7 +78,7 @@ def render(schema: Schema) -> str:
         decoders.append("decode_nullable")
 
     imports = [
-        "from sqlite3 import Row",
+        "from sqrrl.postgres import Row",
         'from typing import AsyncGenerator as _AsyncGenerator, Iterable as _Iterable, Optional, Optional as _Optional, cast as _cast' if any(k in kinds for k in ('enum', 'custom')) else 'from typing import AsyncGenerator as _AsyncGenerator, Iterable as _Iterable, Optional, Optional as _Optional',
         "from dataclasses import dataclass",
         "from contextlib import asynccontextmanager",

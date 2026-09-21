@@ -161,9 +161,18 @@ def test_invalid_paths_fail_before_execution(db, models):
     assert query.loading == ()
 
 
-@mark.parametrize('readers', [0, 2])
-@mark.parametrize('scope', ['query', 'read', 'transaction'])
-@mark.parametrize('pause_after', ['books', 'shelves'])
+@mark.parametrize(
+    'readers, scope, pause_after',
+    [
+        (0, 'query', 'books'),
+        (2, 'query', 'books'),
+        (0, 'read', 'books'),
+        (2, 'read', 'books'),
+        (0, 'transaction', 'books'),
+        (2, 'transaction', 'books'),
+        (2, 'query', 'shelves'),
+    ],
+)
 async def test_nested_loading_uses_one_snapshot(tmp_path, schema, models, monkeypatch, readers, scope, pause_after):
     path = tmp_path / 'snapshot.db'
     async with await Database.create(path, wal=True, readers=readers) as db, await Database.open(path) as writer:

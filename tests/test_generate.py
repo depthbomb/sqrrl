@@ -4,11 +4,12 @@ from pathlib import Path
 from subprocess import run
 from sqrrl import SqrrlError
 from json import dumps, loads
-from pytest import raises, mark
-from sys import executable, prefix
-from sqrrl.generate import render, write
+from pytest import mark, raises
+from sys import prefix, executable
+from tempfile import NamedTemporaryFile
+from sqrrl.generate import write, render
 from annotationlib import Format, get_annotations
-from sqrrl.schema import Schema, Table, integer, text
+from sqrrl.schema import text, Table, Schema, integer
 
 def test_deterministic_generation_and_handwritten_protection(tmp_path, schema):
     assert render(schema) == render(Schema(tuple(reversed(schema.tables))))
@@ -153,3 +154,32 @@ def test_generation_reports_unreadable_existing_file(tmp_path, schema, monkeypat
         write(path, schema)
 
     assert read_text(path, encoding="utf-8") == "# handwritten\n"
+
+
+def test_empty_schema_cannot_generate_models(tmp_path):
+    with raises(SqrrlError, match='At least one table'):
+        write(tmp_path / 'models.py', Schema(()))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_failed_generation_preserves_existing_models_and_removes_temporary_file(tmp_path, schema, monkeypatch):
+    target = write(tmp_path / 'models.py', schema)
+    original = target.read_bytes()
+    temporary_paths = []
+
+    def failing_temporary_file(*args, **kwargs):
+        temporary = NamedTemporaryFile(*args, **kwargs)
+        temporary_paths.append(Path(temporary.name))
+
+        def failed_write(source):
+            raise OSError('disk full')
+
+        temporary.write = failed_write
+        return temporary
+
+    monkeypatch.setattr('sqrrl.generate.NamedTemporaryFile', failing_temporary_file)
+    changed = Schema(schema.tables + (Table('extra', 'Extra', (integer('id').primary_key(),)),))
+    with raises(OSError, match='disk full'):
+        write(target, changed)
+    assert target.read_bytes() == original
+    assert temporary_paths and all(not path.exists() for path in temporary_paths)

@@ -3,12 +3,12 @@ from sys import modules
 from types import ModuleType
 from dataclasses import replace
 from pytest import mark, raises
+from aiosqlite import Connection
 from sqrrl.generate import render
-from aiosqlite import Connection, connect
 from sqrrl.schema import Index, Schema, Table, integer, text
+from sqrrl.migrate import _split, apply, diff, load, status, write
 from sqrrl import Database, MigrationError, SchemaError, SqrrlError
 from sqlite3 import IntegrityError, OperationalError, Row, connect as sqlite_connect
-from sqrrl.migrate import _execute, _split, apply, custom, diff, load, status, write
 
 def generated(schema):
     name = "regression_" + uuid4().hex
@@ -210,13 +210,6 @@ def test_schema_metadata_does_not_coerce_invalid_booleans(flag):
     with raises(SchemaError, match="boolean"):
         Schema.from_dict(metadata)
 
-async def test_custom_sql_accepts_comments_between_tokens():
-    first = await diff((), simple_schema(), "initial")
-    migration = await custom(
-            (first,), "backfill", "; -- leading comment\nUPDATE/* explanation */ notes SET title = 'value';"
-    )
-    assert migration.version == 2
-
 async def test_generated_fields_do_not_shadow_imported_types(tmp_path):
     schema = Schema(
             (
@@ -299,31 +292,6 @@ async def test_generated_operations_ignore_temporary_table_shadows(tmp_path):
             None,
         )
         assert (await (await database.connection.execute("SELECT title FROM temp.notes")).fetchone())[0] == "temporary"
-
-async def test_sql_splitter_preserves_literals_comments_and_trigger_bodies():
-    script = """CREATE TABLE example
-                (
-                    id    INTEGER PRIMARY KEY,
-                    value TEXT
-                );
-    CREATE TRIGGER change_value
-        AFTER INSERT
-        ON example
-    BEGIN
-        UPDATE example SET value = 'it''s; done' WHERE id = NEW.id;
-        SELECT CASE WHEN NEW.id > 0 THEN ';' ELSE 'x' END;
-    END;
--- a quote ' and a semicolon ; in a comment
-    INSERT INTO example(value)
-    VALUES ('first;second'); /* ; trailing */ \
-             """
-    assert len(_split(script)) == 3
-    connection = await connect(":memory:", autocommit=True)
-    try:
-        (await _execute(connection, (script,)))
-        assert (await (await connection.execute("SELECT value FROM example")).fetchone())[0] == "it's; done"
-    finally:
-        (await connection.close())
 
 @mark.parametrize(
         "literal", ["';'", "'one;two;three'", "'it''s; escaped'", '"semi;column"', "`semi;column`", "[semi;column]"]

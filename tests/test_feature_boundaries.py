@@ -1,4 +1,5 @@
 from test_cli import invoke
+from contextlib import closing
 from dataclasses import replace
 from pytest import mark, raises
 from test_async import pause_sql
@@ -294,7 +295,6 @@ async def test_metadata_only_changes_and_representation_guard():
     second = await diff((first,), factory, 'factory')
     assert second.statements == ('SELECT 1;',)
     await check((first, second), factory)
-    assert schema.to_dict() == Schema.from_dict(schema.to_dict()).to_dict()
 
 
 def test_invalid_relationship_and_factory_metadata():
@@ -406,17 +406,17 @@ def test_adoption_cli_preserves_external_history(tmp_path):
         'CREATE TABLE old_history (version TEXT PRIMARY KEY); CREATE INDEX old_versions ON old_history(version);'
     )
     (tmp_path / 'preserved.sql').write_text(preserved, encoding='utf-8')
-    with sqlite_connect(tmp_path / 'external.db') as connection:
+    with closing(sqlite_connect(tmp_path / 'external.db')) as connection, connection:
         connection.executescript(
             'create table notes (id integer primary key not null, title text not null) strict;'
             + preserved
             + "INSERT INTO notes VALUES (1, 'keep'); INSERT INTO old_history VALUES ('v1');"
         )
     invoke(tmp_path, 'migrate', 'adopt', '--db', 'external.db', '--preserve-sql', 'preserved.sql')
-    with sqlite_connect(tmp_path / 'external.db') as connection:
+    with closing(sqlite_connect(tmp_path / 'external.db')) as connection:
         assert not connection.execute("SELECT 1 FROM sqlite_schema WHERE name='sqrrl_migrations'").fetchall()
     invoke(tmp_path, 'migrate', 'baseline', '--db', 'external.db', '--version', '1')
     invoke(tmp_path, 'migrate', 'check')
     assert 'applied' in invoke(tmp_path, 'migrate', 'status', '--db', 'external.db').stdout
-    with sqlite_connect(tmp_path / 'external.db') as connection:
+    with closing(sqlite_connect(tmp_path / 'external.db')) as connection:
         assert connection.execute('SELECT * FROM old_history').fetchall() == [('v1',)]

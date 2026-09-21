@@ -154,7 +154,7 @@ async def test_files_checksums_and_drift(tmp_path):
 async def test_custom_backfill_comments_semicolons_and_rollback(tmp_path):
     first = await diff((), notes(), "initial")
     backfill = await custom(
-            (first,), "backfill", "-- backfill; comment\nUPDATE notes SET title = 'semi;colon'; /* trailing comment */"
+            (first,), 'backfill', "; -- backfill; comment\nUPDATE/* explanation */ notes SET title = 'semi;colon'; /* trailing comment */"
     )
     async with await Database.create(tmp_path / "backfill.db") as database:
         (await apply(database, (first,)))
@@ -176,6 +176,7 @@ async def test_custom_backfill_comments_semicolons_and_rollback(tmp_path):
             "UPDATE notes SET title = 'x'; COMMIT;",
             "DELETE FROM sqrrl_migrations;",
             "SELECT * FROM sqrrl_migrations;",
+            "SELECT load_extension('forbidden');",
     ):
         with raises((MigrationError, DatabaseError)):
             (await custom((first,), "forbidden", script))

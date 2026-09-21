@@ -134,7 +134,13 @@ class Table:
 
         raise SchemaError(f"Unknown field {self.name}.{name}")
 
-    def create_sql(self, name: Optional[str] = None) -> str:
+    def create_sql(self, name: Optional[str] = None, *, dialect: str = 'sqlite') -> str:
+        if dialect == 'postgresql':
+            from sqrrl.pg_schema import create_sql
+            return create_sql(replace(self, name=name) if name else self)
+        if dialect != 'sqlite':
+            raise SchemaError(f'Unknown dialect: {dialect}')
+
         keys = tuple(field.name for field in self.keys)
         parts = []
         for field in self.fields:
@@ -174,7 +180,13 @@ class Table:
 
         return f"CREATE TABLE main.{quote(name or self.name)} (\n  " + ",\n  ".join(parts) + "\n)" + suffix
 
-    def index_sql(self) -> tuple[str, ...]:
+    def index_sql(self, *, dialect: str = 'sqlite') -> tuple[str, ...]:
+        if dialect == 'postgresql':
+            from sqrrl.pg_schema import index_sql
+            return index_sql(self)
+        if dialect != 'sqlite':
+            raise SchemaError(f'Unknown dialect: {dialect}')
+
         statements = []
         for index in self.indexes:
             unique = "UNIQUE " if index.unique else ""

@@ -4,15 +4,17 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from sqrrl.schema import Field, Table, quote
 from aiosqlite import Connection, Cursor, connect
-from sqlite3 import Row, sqlite_version_info, SQLITE_LIMIT_VARIABLE_NUMBER
 from sqrrl.errors import NotFoundError, NotSingularError, SqrrlError, ValidationError
+from sqlite3 import Row as SQLiteRow, sqlite_version_info, SQLITE_LIMIT_VARIABLE_NUMBER
 from asyncio import CancelledError, Condition, Lock, Task, current_task, ensure_future, shield
+from sqrrl.postgres import Row, PostgresConnection, Cursor as PostgresCursor, connect as pg_connect
 from typing import Any, AsyncIterator, Awaitable, Callable, Generic, Iterable, Optional, TypeVar, cast
 from sqrrl.codecs import Codec, decode_datetime, decode_json, encode_datetime, encode_json, enum_type, factory_value, resolve
 
 M = TypeVar("M")
 T = TypeVar("T")
 R = TypeVar('R')
+C = TypeVar('C', bound=Connection | PostgresConnection, default=Any)
 
 class Unloaded:
     """A relationship that has not been explicitly loaded."""
@@ -37,17 +39,17 @@ class Unset:
     def __repr__(self) -> str:
         return "UNSET"
 
-class Database:
-    """One serialized writer with optional bounded file-backed reader connections.
+class Database(Generic[C]):
+    """One serialized writer with optional bounded reader connections.
 
-    Open with ``async with await Database.open(path)``. Keep a transaction's
+    Open a file or PostgreSQL URL with ``async with await Database.open(path)``. Keep a transaction's
     work in its owning task; use separate connections for concurrent work
     inside that scope.
     """
 
-    def __init__(self, connection: Connection, *, immediate: bool = False) -> None:
-        if not isinstance(connection, Connection):
-            raise TypeError("Database requires an aiosqlite connection; use await Database.open() or create()")
+    def __init__(self, connection: C, *, immediate: bool = False) -> None:
+        if not isinstance(connection, (Connection, PostgresConnection)):
+            raise TypeError("Database requires an aiosqlite or PostgreSQL connection; use await Database.open() or create()")
 
         self._connection = connection
         self._immediate = immediate
@@ -56,9 +58,9 @@ class Database:
         self._savepoint_prefix = f"sqrrl_{id(self):x}"
         self._lock = Lock()
         self._owner: Optional[Task[object]] = None
-        self._readers: list[Connection] = []
-        self._available: list[Connection] = []
-        self._read_owners: dict[Task[object], Connection] = {}
+        self._readers: list[C] = []
+        self._available: list[C] = []
+        self._read_owners: dict[Task[object], C] = {}
         self._reader_condition = Condition()
         self._closing = False
         self._closed = False
@@ -70,7 +72,7 @@ class Database:
         await self.close()
 
     @property
-    def connection(self) -> Connection:
+    def connection(self) -> C:
         """Async SQL access; use a transaction to coordinate raw SQL across tasks.
 
         The caller owns cursor cleanup and must not share a saved connection
@@ -87,15 +89,36 @@ class Database:
 
         return self._connection
 
+    @property
+    def dialect(self) -> str:
+        return 'postgresql' if isinstance(self._connection, PostgresConnection) else 'sqlite'
+
     def _check_transaction(self) -> None:
         if self._savepoint and (self._transaction_failed or not self._connection.in_transaction):
             self._transaction_failed = True
             raise SqrrlError("Transaction ended unexpectedly; leave the transaction scope before reusing the database")
 
     @classmethod
-    async def _connect(cls, path: str | Path, create: bool, wal: bool, timeout: float, immediate: bool, readers: int = 0) -> Database:
+    async def _connect(cls: type[Database[Any]], path: str | Path, create: bool, wal: bool, timeout: float, immediate: bool, readers: int = 0) -> Database:
         if type(readers) is not int or readers < 0:
             raise ValueError('readers must be a nonnegative integer')
+        if isinstance(path, str) and path.startswith(('postgresql://', 'postgres://')):
+            if wal or immediate:
+                raise ValueError('wal and immediate are SQLite-only options')
+            if not isfinite(timeout) or timeout <= 0:
+                raise ValueError('PostgreSQL timeout must be finite and positive')
+            pg: Database[PostgresConnection] = cls(await pg_connect(path, timeout))
+            try:
+                for _ in range(readers):
+                    pg_reader = await pg_connect(path, timeout)
+                    pg._readers.append(pg_reader)
+                    await pg_reader.raw.execute('SET default_transaction_read_only = on')
+                    pg._available.append(pg_reader)
+            except BaseException:
+                await _settle(pg._close_connections())
+                raise
+            return pg
+
         if sqlite_version_info < (3, 37, 0):
             raise SqrrlError("sqrrl requires SQLite 3.37.0 or newer")
 
@@ -105,10 +128,10 @@ class Database:
         mode = "rwc" if create else "rw"
         uri = Path(path).resolve().as_uri() + f"?mode={mode}"
         connection = connect(uri, uri=True, timeout=timeout, isolation_level=None)
-        database = cls(connection, immediate=immediate)
+        database: Database[Connection] = cls(connection, immediate=immediate)
         try:
             await _settle(connection)
-            connection.row_factory = Row
+            connection.row_factory = SQLiteRow
             await _execute_sql(connection, "PRAGMA foreign_keys = ON")
             await _execute_sql(connection, "PRAGMA synchronous = FULL")
             if wal:
@@ -120,7 +143,7 @@ class Database:
                 reader = connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True, timeout=timeout, isolation_level=None)
                 database._readers.append(reader)
                 await _settle(reader)
-                reader.row_factory = Row
+                reader.row_factory = SQLiteRow
                 await _execute_sql(reader, 'PRAGMA query_only = ON')
                 await _execute_sql(reader, 'PRAGMA foreign_keys = ON')
                 database._available.append(reader)
@@ -134,14 +157,14 @@ class Database:
     async def open(
             cls, path: str | Path, *, wal: bool = False, timeout: float = 5.0, immediate: bool = False, readers: int = 0
     ) -> Database:
-        """Open an existing file. Migrations are always applied explicitly."""
+        """Open an existing SQLite file or PostgreSQL database URL."""
         return await cls._connect(path, False, wal, timeout, immediate, readers)
 
     @classmethod
     async def create(
             cls, path: str | Path, *, wal: bool = False, timeout: float = 5.0, immediate: bool = False, readers: int = 0
     ) -> Database:
-        """Create a file if missing, or open an existing database."""
+        """Create a SQLite file if missing, or open an existing PostgreSQL database."""
         return await cls._connect(path, True, wal, timeout, immediate, readers)
 
     async def close(self) -> None:
@@ -175,7 +198,7 @@ class Database:
             raise failure
 
     @asynccontextmanager
-    async def _read_access(self) -> AsyncIterator[Connection]:
+    async def _read_access(self) -> AsyncIterator[C]:
         task = current_task()
         if task is None:
             raise SqrrlError('Reads require an asyncio task')
@@ -208,7 +231,7 @@ class Database:
             self._reader_condition.notify_all()
 
     @asynccontextmanager
-    async def read_connection(self) -> AsyncIterator[Connection]:
+    async def read_connection(self) -> AsyncIterator[C]:
         """Pin a read snapshot. Raw callers must close cursors before leaving.
 
         Repository reads outside this scope see the latest committed snapshot
@@ -218,7 +241,7 @@ class Database:
             nested = connection.in_transaction
             try:
                 if not nested:
-                    await _execute_sql(connection, 'BEGIN')
+                    await _execute_sql(connection, 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY' if self.dialect == 'postgresql' else 'BEGIN')
                 yield connection
             finally:
                 if not nested and connection.in_transaction:
@@ -247,7 +270,7 @@ class Database:
     async def transaction(self) -> AsyncIterator[Database]:
         """Commit on success and roll back on errors or cancellation.
 
-        Cleanup waits for queued SQLite work. A commit already executing can
+        Cleanup waits for pending database work. A commit already executing can
         finish before cancellation is delivered.
         """
         async with self._access():
@@ -260,15 +283,17 @@ class Database:
         nested = self._connection.in_transaction
         savepoint = f"{self._savepoint_prefix}_{self._savepoint + 1}"
         begin = f"SAVEPOINT {savepoint}" if nested else ("BEGIN IMMEDIATE" if self._immediate else "BEGIN")
+        if not nested and self.dialect == 'postgresql':
+            begin = 'BEGIN ISOLATION LEVEL REPEATABLE READ'
         commit = f"RELEASE {savepoint}" if nested else "COMMIT"
-        beginning = ensure_future(self._connection.execute_fetchall(begin))
+        beginning = ensure_future(_control_sql(self._connection, begin))
         ending = None
         self._savepoint += 1
         try:
             await _settle(beginning)
             yield self
             self._check_transaction()
-            ending = ensure_future(self._connection.execute_fetchall(commit))
+            ending = ensure_future(_control_sql(self._connection, commit))
             await _settle(ending)
         except BaseException:
             started = beginning.done() and not beginning.cancelled() and beginning.exception() is None
@@ -367,7 +392,7 @@ class Column(Generic[M, T]):
     def in_(self, *values: T) -> Predicate[M]:
         encoded = tuple(encode(self.field, value) for value in values)
         if not encoded:
-            return Predicate(self.model, "0")
+            return Predicate(self.model, "1 = 0")
 
         present = tuple(value for value in encoded if value is not None)
         expressions = []
@@ -417,7 +442,7 @@ class Query(Generic[M]):
             arguments += (self.row_limit,)
 
         if not count and self.row_offset:
-            if self.row_limit is None:
+            if self.row_limit is None and self.database.dialect == 'sqlite':
                 query += ' LIMIT -1'
             query += ' OFFSET ?'
             arguments += (self.row_offset,)
@@ -554,14 +579,14 @@ class Related(Generic[M, R]):
         return Predicate(self.model, expression, tuple(arg for p in predicates for arg in p.arguments))
 
     async def _load(
-            self, connection: Connection, parents: list[M], children: Optional[dict[str, _LoadNode]] = None
+            self, connection: Connection | PostgresConnection, parents: list[M], children: Optional[dict[str, _LoadNode]] = None
     ) -> list[M]:
         keys = list(dict.fromkeys(tuple(getattr(row, name) for name in self.fields) for row in parents))
         keys = [key for key in keys if all(value is not None for value in key)]
         width = len(self.target)
         limit = await _parameter_limit(connection)
         if keys and width > limit:
-            raise ValidationError('Relationship key exceeds the SQLite parameter limit')
+            raise ValidationError('Relationship key exceeds the database parameter limit')
 
         size = max(1, limit // width)
         related: list[R] = []
@@ -571,7 +596,8 @@ class Related(Generic[M, R]):
             columns = ', '.join(map(quote, self.target))
             placeholders = ', '.join('(' + ', '.join('?' for _ in self.target) + ')' for _ in batch)
             order = ', '.join(quote(field.name) for field in self.table.keys)
-            sql = f'SELECT * FROM main.{quote(self.table.name)} WHERE ({columns}) IN (VALUES {placeholders}) ORDER BY {order}'
+            values_keyword = '' if isinstance(connection, PostgresConnection) else 'VALUES '
+            sql = f'SELECT * FROM main.{quote(self.table.name)} WHERE ({columns}) IN ({values_keyword}{placeholders}) ORDER BY {order}'
             related.extend(self.decoder(row) for row in await _fetch_all(connection, sql, arguments))
 
         if related and children:
@@ -770,7 +796,7 @@ class Repository(Generic[M]):
             if all_rows is not True:
                 raise ValidationError('Supply a predicate or explicitly set all_rows=True')
 
-            return Predicate(self._model, '1')
+            return Predicate(self._model, '1 = 1')
 
         if predicate.model is not self._model or all_rows:
             raise ValidationError('Invalid mutation predicate or all_rows combination')
@@ -809,15 +835,13 @@ class Repository(Generic[M]):
 
                 return len(rows)
 
-            async with _cursor(self._database.connection, sql, tuple(arguments) + predicate.arguments) as cursor:
-                return cursor.rowcount
+            return await _affected_rows(self._database.connection, sql, tuple(arguments) + predicate.arguments)
 
     async def delete_where(self, predicate: Optional[Predicate[M]] = None, /, *, all_rows: bool = False) -> int:
         predicate = self._mutation_predicate(predicate, all_rows)
         sql = f'DELETE FROM main.{quote(self._table.name)} WHERE {predicate.expression}'
         async with self._database.transaction():
-            async with _cursor(self._database.connection, sql, predicate.arguments) as cursor:
-                return cursor.rowcount
+            return await _affected_rows(self._database.connection, sql, predicate.arguments)
 
     def _conflict_sql(self, conflict: Optional[Conflict[M]]) -> str:
         if conflict is None:
@@ -877,9 +901,13 @@ class Repository(Generic[M]):
 
                     if isinstance(value, Unset):
                         if self._table.auto_key and field in self._keys:
-                            cells.append('NULL')
+                            cells.append('DEFAULT' if self._database.dialect == 'postgresql' else 'NULL')
                         elif field.default_sql is not None:
-                            cells.append(field.default_sql)
+                            if self._database.dialect == 'postgresql':
+                                from sqrrl.pg_schema import default_sql
+                                cells.append(default_sql(field))
+                            else:
+                                cells.append(field.default_sql)
                         elif field.is_nullable:
                             cells.append('NULL')
                         else:
@@ -889,7 +917,7 @@ class Repository(Generic[M]):
                         parameters.append(encode(field, value))
 
                 if len(parameters) > limit:
-                    raise ValidationError('One row exceeds the SQLite parameter limit')
+                    raise ValidationError('One row exceeds the database parameter limit')
 
                 if rows and (len(arguments) + len(parameters) > limit or len(rows) >= 1000):
                     result = await _fetch_all(connection, prefix + ', '.join(rows) + suffix + ' RETURNING ' + self._columns, tuple(arguments))
@@ -907,7 +935,10 @@ class Repository(Generic[M]):
 
 UNSET = Unset()
 
-async def _parameter_limit(connection: Connection) -> int:
+async def _parameter_limit(connection: Connection | PostgresConnection) -> int:
+    if isinstance(connection, PostgresConnection):
+        return 32767
+
     # aiosqlite has no public getlimit wrapper. Run sqlite3's API on its worker.
     execute = cast(Callable[..., Awaitable[int]], connection._execute)
 
@@ -929,22 +960,38 @@ async def _settle(action: Awaitable[T]) -> T:
 
     return result
 
-async def _close_cursor(pending: Awaitable[Cursor]) -> None:
+async def _close_cursor(pending: Awaitable[Cursor | PostgresCursor]) -> None:
     cursor = await pending
     await cursor.close()
 
 @asynccontextmanager
-async def _cursor(connection: Connection, sql: str, arguments: tuple[object, ...] = ()) -> AsyncIterator[Cursor]:
-    pending = ensure_future(connection.execute(sql, arguments))
+async def _cursor(connection: Connection | PostgresConnection, sql: str, arguments: tuple[object, ...] = ()) -> AsyncIterator[Cursor | PostgresCursor]:
+    action: Awaitable[Cursor | PostgresCursor] = connection.execute(sql, arguments)
+    pending = ensure_future(action)
     try:
         yield await shield(pending)
     finally:
         await _settle(_close_cursor(pending))
 
-async def _execute_sql(connection: Connection, sql: str, arguments: tuple[object, ...] = ()) -> None:
-    await _settle(connection.execute_fetchall(sql, arguments))
+async def _control_sql(connection: Connection | PostgresConnection, sql: str) -> None:
+    if isinstance(connection, PostgresConnection):
+        await connection.execute_control(sql)
+    else:
+        await connection.execute_fetchall(sql)
 
-async def _fetch_all(connection: Connection, sql: str, arguments: tuple[object, ...] = ()) -> list[Row]:
+async def _affected_rows(connection: Connection | PostgresConnection, sql: str, arguments: tuple[object, ...]) -> int:
+    if isinstance(connection, PostgresConnection):
+        return await _settle(connection.execute_count(sql, arguments))
+    async with _cursor(connection, sql, arguments) as cursor:
+        return cursor.rowcount
+
+async def _execute_sql(connection: Connection | PostgresConnection, sql: str, arguments: tuple[object, ...] = ()) -> None:
+    if isinstance(connection, PostgresConnection) and not arguments:
+        await _settle(connection.execute_control(sql))
+    else:
+        await _settle(connection.execute_fetchall(sql, arguments))
+
+async def _fetch_all(connection: Connection | PostgresConnection, sql: str, arguments: tuple[object, ...] = ()) -> list[Row]:
     rows = await _settle(connection.execute_fetchall(sql, arguments))
 
     return list(rows)

@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sqrrl"
 version = "0.3.0"
-description = "Generated typed async data access and checked migrations for SQLite"
+description = "Generated typed async data access and checked migrations for SQLite and PostgreSQL"
 readme = "README.md"
 requires-python = ">=3.14"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = ["aiosqlite>=0.22"]
 authors = [{ name = "depthbomb" }]
-keywords = ["sqlite", "async", "database", "migrations", "code-generation", "typing"]
+keywords = ["sqlite", "postgresql", "async", "database", "migrations", "code-generation", "typing"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -30,13 +30,15 @@ Issues = "https://github.com/depthbomb/sqrrl/issues"
 Releases = "https://github.com/depthbomb/sqrrl/releases"
 
 [project.optional-dependencies]
+pg = ["asyncpg>=0.31.0"]
 dev = [
+    "asyncpg-stubs>=0.31.3",
     "build>=1.2",
     "mypy>=1.18.2",
     "pyright>=1.1.407",
     "pytest>=8",
     "pytest-asyncio>=1",
-    "pytest-cov>=6",
+    "pytest-cov>=7",
     "ruff>=0.14",
     "twine>=6",
 ]
@@ -53,9 +55,17 @@ sqrrl = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-config --strict-markers"
+addopts = "-ra --strict-config --strict-markers -m 'not stress'"
+markers = ["stress: larger workloads excluded by default; run with -m stress"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+
+[tool.coverage.run]
+branch = true
+patch = ["subprocess"]
+
+[tool.coverage.report]
+precision = 2
 
 [tool.mypy]
 python_version = "3.14"
