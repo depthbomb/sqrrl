@@ -893,29 +893,32 @@ class Repository(Generic[M]):
             rows: list[str] = []
             arguments: list[object] = []
             prefix = f'INSERT INTO main.{quote(self._table.name)} ({self._columns}) VALUES '
+            defaults: list[tuple[Field, Optional[str]]] = []
+            for field in self._table.fields:
+                default = field.default_sql
+                if self._table.auto_key and field in self._keys:
+                    default = 'DEFAULT' if self._database.dialect == 'postgresql' else 'NULL'
+                elif default is not None and self._database.dialect == 'postgresql':
+                    from sqrrl.pg_schema import default_sql
+                    default = default_sql(field)
+                elif default is None and field.is_nullable:
+                    default = 'NULL'
+                defaults.append((field, default))
+
             for item in values:
                 cells = []
                 parameters = []
-                for name in item:
+                for name in item.keys() - self._quoted_fields.keys():
                     self._table.field(name)
-                for field in self._table.fields:
+                for field, default in defaults:
                     value = item.get(field.name, UNSET)
                     if isinstance(value, Unset) and field.factory is not None:
                         value = factory_value(field.factory)
 
                     if isinstance(value, Unset):
-                        if self._table.auto_key and field in self._keys:
-                            cells.append('DEFAULT' if self._database.dialect == 'postgresql' else 'NULL')
-                        elif field.default_sql is not None:
-                            if self._database.dialect == 'postgresql':
-                                from sqrrl.pg_schema import default_sql
-                                cells.append(default_sql(field))
-                            else:
-                                cells.append(field.default_sql)
-                        elif field.is_nullable:
-                            cells.append('NULL')
-                        else:
+                        if default is None:
                             raise ValidationError(f'{field.name} is required')
+                        cells.append(default)
                     else:
                         cells.append('?')
                         parameters.append(encode(field, value))
