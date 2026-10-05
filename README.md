@@ -194,8 +194,8 @@ matching = await client.notes.query().where(NoteColumns.done.eq(False) & NoteCol
 
 `first()` returns `None` when nothing matches. `only()` requires exactly one row:
 it raises `NotFoundError` for no matches and `NotSingularError` for multiple
-matches. `get()` and `update()` also raise `NotFoundError` for a missing key;
-deleting a missing row is fine. These errors are available from `sqrrl`.
+matches. `get()`, `update()`, and `delete()` also raise `NotFoundError` for a
+missing key. These errors are available from `sqrrl`.
 
 ## Transactions and connections
 
@@ -306,3 +306,7 @@ writes and typed reads, with a native asyncpg read included for comparison.
 `python benchmarks/bench_postgres_pass.py --output PATH` measures migration status
 on 30 tables, repeated updates, cursor reads, and bulk inserts. It records warmed
 sample timings and medians as JSON; `--source-root` selects a checkout to compare.
+
+`python benchmarks/bench_bulk.py --output PATH` measures 5,000-row inserts with
+explicit values and SQL defaults on narrow and wide tables. Add `--postgres`
+to use `SQRRL_TEST_POSTGRES`, or `--source-root PATH` to benchmark another checkout.
