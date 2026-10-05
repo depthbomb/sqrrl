@@ -14,6 +14,7 @@ concurrency:
 
 jobs:
   validate:
+    name: Validate distributions
     uses: ./.github/workflows/tests.yml
 
   publish:
@@ -28,9 +29,11 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v8
+      - name: Download validated distributions
+        uses: actions/download-artifact@v8
         with:
-          name: python-distributions
+          pattern: python-distributions-*
+          merge-multiple: true
           path: dist/
       - name: Publish validated distributions
         uses: pypa/gh-action-pypi-publish@release/v1
