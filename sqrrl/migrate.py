@@ -304,13 +304,16 @@ async def _record(connection: Connection, migration: Migration) -> None:
 
 def _plan(previous: Schema, desired: Schema, allow_drop: bool) -> tuple[str, ...]:
     statements: list[str] = []
+    table_creates: list[str] = []
+    table_drops: list[str] = []
+    table_renames: list[str] = []
     index_drops: list[str] = []
     index_creates: list[str] = []
     old_tables = {table.key: table for table in previous.tables}
     for table in desired.tables:
         old = old_tables.pop(table.key, None)
         if old is None:
-            statements.append(table.create_sql())
+            table_creates.append(table.create_sql())
             index_creates.extend(table.index_sql())
             continue
 
@@ -320,7 +323,8 @@ def _plan(previous: Schema, desired: Schema, allow_drop: bool) -> tuple[str, ...
             if prior is not None and (field.kind, field.codec, field.python_type) != (prior.kind, prior.codec, prior.python_type):
                 raise MigrationError(f'{table.name}.{field.name}: automatic representation changes are unsupported')
 
-        if table.create_sql() == old.create_sql():
+        same_fields = tuple(field.key for field in table.fields) == tuple(field.key for field in old.fields)
+        if same_fields and table.create_sql() == old.create_sql():
             old_indexes = {index.name: sql for index, sql in zip(old.indexes, old.index_sql(), strict=True)}
             new_indexes = {index.name: sql for index, sql in zip(table.indexes, table.index_sql(), strict=True)}
             index_drops.extend(
@@ -360,21 +364,22 @@ def _plan(previous: Schema, desired: Schema, allow_drop: bool) -> tuple[str, ...
                 (
                     table.create_sql(temporary),
                     f"INSERT INTO main.{quote(temporary)} ({', '.join(destination)}) SELECT {', '.join(source)} FROM main.{quote(old.name)};",
-                    f"DROP TABLE main.{quote(old.name)};",
-                    f"ALTER TABLE main.{quote(temporary)} RENAME TO {quote(table.name)};",
                 )
         )
+        table_drops.append(f'DROP TABLE main.{quote(old.name)};')
+        table_renames.append(f'ALTER TABLE main.{quote(temporary)} RENAME TO {quote(table.name)};')
         index_creates.extend(table.index_sql())
 
     if old_tables and not allow_drop:
         raise MigrationError("Schema removes tables; preserve their key for renames or pass --allow-drop")
 
-    statements.extend(
+    table_drops.extend(
             f"DROP TABLE main.{quote(table.name)};" for table in
             sorted(old_tables.values(), key=lambda table: table.name)
     )
 
-    return tuple(index_drops + statements + index_creates)
+    # Copy every preserved table before freeing names for swaps or replacements.
+    return tuple(index_drops + statements + table_drops + table_renames + table_creates + index_creates)
 
 def _new(
         history: tuple[Migration, ...], schema: Schema, name: str, statements: tuple[str, ...], before: str, after: str
