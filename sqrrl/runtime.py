@@ -492,7 +492,8 @@ class Query(Generic[M]):
         sql, arguments = self._sql(projection)
         if self.loading:
             async with self.database.read_connection() as connection:
-                rows = [self.decoder(row) for row in await _fetch_all(connection, sql, arguments)]
+                stored_rows = await _fetch_all(connection, sql, arguments)
+                rows = [self.decoder(row) for row in stored_rows]
                 nodes: dict[str, _LoadNode] = {}
                 for selection in self.loading:
                     branch = nodes
@@ -501,7 +502,7 @@ class Query(Generic[M]):
                         node = branch.setdefault(relation.name, _LoadNode(relation, {}))
                         branch = node.children
                 for node in nodes.values():
-                    rows = await node.relation._load(connection, rows, node.children)
+                    rows = await node.relation._load(connection, rows, stored_rows, node.children)
 
                 return rows
 
@@ -579,39 +580,42 @@ class Related(Generic[M, R]):
         return Predicate(self.model, expression, tuple(arg for p in predicates for arg in p.arguments))
 
     async def _load(
-            self, connection: Connection | PostgresConnection, parents: list[M], children: Optional[dict[str, _LoadNode]] = None
+            self, connection: Connection | PostgresConnection, parents: list[M], stored_parents: list[Row],
+            children: Optional[dict[str, _LoadNode]] = None
     ) -> list[M]:
-        keys = list(dict.fromkeys(tuple(getattr(row, name) for name in self.fields) for row in parents))
-        keys = [key for key in keys if all(value is not None for value in key)]
+        # Foreign keys compare stored values, which may decode to unhashable or equal Python objects.
+        parent_keys = [tuple(row[name] for name in self.fields) for row in stored_parents]
+        keys = list(dict.fromkeys(key for key in parent_keys if all(value is not None for value in key)))
         width = len(self.target)
         limit = await _parameter_limit(connection)
         if keys and width > limit:
             raise ValidationError('Relationship key exceeds the database parameter limit')
 
         size = max(1, limit // width)
-        related: list[R] = []
+        stored_related: list[Row] = []
         for start in range(0, len(keys), size):
             batch = keys[start:start + size]
-            arguments = tuple(encode(self.table.field(name), value) for key in batch for name, value in zip(self.target, key, strict=True))
+            arguments = tuple(value for key in batch for value in key)
             columns = ', '.join(map(quote, self.target))
             placeholders = ', '.join('(' + ', '.join('?' for _ in self.target) + ')' for _ in batch)
             order = ', '.join(quote(field.name) for field in self.table.keys)
             values_keyword = '' if isinstance(connection, PostgresConnection) else 'VALUES '
             sql = f'SELECT * FROM main.{quote(self.table.name)} WHERE ({columns}) IN ({values_keyword}{placeholders}) ORDER BY {order}'
-            related.extend(self.decoder(row) for row in await _fetch_all(connection, sql, arguments))
+            stored_related.extend(await _fetch_all(connection, sql, arguments))
 
+        related = [self.decoder(row) for row in stored_related]
         if related and children:
             for node in children.values():
-                related = await node.relation._load(connection, related, node.children)
+                related = await node.relation._load(connection, related, stored_related, node.children)
 
         groups: dict[tuple[object, ...], list[R]] = {}
-        for decoded in related:
-            key = tuple(getattr(decoded, name) for name in self.target)
+        for stored, decoded in zip(stored_related, related, strict=True):
+            key = tuple(stored[name] for name in self.target)
             groups.setdefault(key, []).append(decoded)
 
         results = []
-        for parent in parents:
-            matches = groups.get(tuple(getattr(parent, name) for name in self.fields), [])
+        for parent, key in zip(parents, parent_keys, strict=True):
+            matches = groups.get(key, [])
             if not self.many and len(matches) > 1:
                 raise NotSingularError('Singular relationship returned multiple rows')
 
