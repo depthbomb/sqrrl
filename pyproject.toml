@@ -20,6 +20,8 @@ classifiers = [
     'Programming Language :: Python :: 3',
     'Programming Language :: Python :: 3 :: Only',
     'Programming Language :: Python :: 3.14',
+    'Programming Language :: Python :: 3.15',
+    'Programming Language :: Python :: Implementation :: CPython',
     'Typing :: Typed',
 ]
 
@@ -30,7 +32,10 @@ Issues = 'https://github.com/depthbomb/sqrrl/issues'
 Releases = 'https://github.com/depthbomb/sqrrl/releases'
 
 [project.optional-dependencies]
-pg = ['asyncpg>=0.31.0']
+pg = [
+    'asyncpg>=0.31.0; python_version < "3.15"',
+    'asyncpg>=0.32.0; python_version >= "3.15"',
+]
 dev = [
     'asyncpg-stubs>=0.31.3',
     'build>=1.2',
