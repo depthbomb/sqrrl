@@ -1,3 +1,5 @@
+__lazy_modules__ = ('sqrrl.codecs', 'sqrrl.runtime')
+
 from sqrrl.codecs import Codec, JsonValue
 from sqrrl.runtime import UNSET, UNLOADED, Conflict, Database, Increment, Unloaded
 from sqrrl.errors import MigrationError, NotFoundError, NotSingularError, SchemaError, SqrrlError, ValidationError

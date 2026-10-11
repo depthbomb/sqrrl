@@ -1,3 +1,5 @@
+__lazy_modules__ = ('sqrrl.schema', 'sqrrl.runtime', 'sqrrl.generate', 'sqrrl.migrate')
+
 from os import environ
 from pathlib import Path
 from subprocess import run
